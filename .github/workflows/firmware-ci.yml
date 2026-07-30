@@ -1,0 +1,31 @@
+name: firmware-ci
+
+on:
+  pull_request:
+    paths:
+      - 'stackchan/**'
+      - '.github/workflows/firmware-ci.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'stackchan/**'
+      - '.github/workflows/firmware-ci.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: stackchan
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install platformio
+      - run: cp include/secrets.example.hpp include/secrets.hpp
+      - run: cp include/relay_endpoint.example.hpp include/relay_endpoint.hpp
+      - run: pio run

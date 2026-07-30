@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+.env
+.env.*
+!**/.env.example
+
+# PlatformIO
+stackchan/.pio/
+stackchan/.vscode/
+stackchan/include/secrets*.hpp
+!stackchan/include/secrets.example.hpp
+stackchan/include/relay_endpoint.hpp
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Build / temp
+*.log
+*.pcm
+*.wav
+*.pem
+*.key
+*.p12
+*.pfx
+dist/
+build/
+infra/main.json

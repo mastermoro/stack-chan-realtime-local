@@ -1,0 +1,10 @@
+using './main.bicep'
+
+param location = 'japaneast'
+param namePrefix = 'stackchan-rt'
+param containerImage = 'REPLACE.azurecr.io/stackchan-relay:latest'
+param azureOpenAIEndpoint = 'https://REPLACE.openai.azure.com'
+param realtimeDeployment = 'gpt-realtime-2.1'
+param responsesDeployment = 'gpt-5.6-terra'
+param deviceTokensJson = '{"stackchan-001":"REPLACE"}'
+param foundryAccountName = ''
