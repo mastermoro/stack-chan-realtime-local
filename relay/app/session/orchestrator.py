@@ -63,12 +63,13 @@ class RelaySession:
         self._output_suppressed = False
         self._cancellation_pending = False
         self._announced_output_item: tuple[str, int] | None = None
+        self._face_mode = False
 
     async def run(self) -> None:
         connected_once = False
         while True:
             try:
-                async with self.realtime.connect() as connection:
+                async with self.realtime.connect(face_mode=self._face_mode) as connection:
                     await self.websocket.send_json(
                         session_connected_message(self.device_id, reconnected=connected_once)
                     )
@@ -233,6 +234,18 @@ class RelaySession:
             await self._set_state(DeviceState.THINKING)
         elif message_type in {"response.cancel", "conversation.pause"}:
             await self._interrupt_response(connection, payload)
+        elif message_type == "ui.mode":
+            mode = payload.get("mode")
+            if mode not in {"standard", "face"}:
+                await self._send_error("INVALID_UI_MODE", "mode must be standard or face")
+                return
+            self._face_mode = mode == "face"
+            await connection.session.update(
+                session={
+                    "type": "realtime",
+                    "instructions": self.realtime.instructions(face_mode=self._face_mode),
+                }
+            )
         elif message_type == "ping":
             await self.websocket.send_json({"type": "pong"})
         else:
