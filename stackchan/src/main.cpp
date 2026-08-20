@@ -896,7 +896,8 @@ void note_activity(bool return_home) {
 
 void update_idle_behavior() {
   const uint32_t now = millis();
-  const bool can_idle = (state == AgentState::Ready || state == AgentState::Listening) &&
+  const bool can_idle = ui_page == UiPage::Face &&
+                        (state == AgentState::Ready || state == AgentState::Listening) &&
                         !camera_wipe_visible;
   if (!can_idle) {
     if (idle_mode != IdleMode::Active) note_activity(false);
