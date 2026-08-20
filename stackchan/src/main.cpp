@@ -3,6 +3,7 @@
 #include <M5StackChan.h>
 #include <esp_now.h>
 #include <esp_camera.h>
+#include <esp_random.h>
 
 #include <list>
 #include <vector>
@@ -28,7 +29,9 @@ bool conversation_active = false;
 bool resume_after_response = false;
 bool relay_started = false;
 enum class UiPage : uint8_t { Status, Face, Settings };
+enum class IdleMode : uint8_t { Active, LookingAround, Sleeping };
 UiPage ui_page = UiPage::Status;
+IdleMode idle_mode = IdleMode::Active;
 bool face_overlay_visible = false;
 uint32_t face_overlay_until = 0;
 bool camera_wipe_visible = false;
@@ -48,6 +51,14 @@ float measured_x = 0.0F;
 float measured_y = 0.0F;
 float face_velocity_x = 0.0F;
 float face_velocity_y = 0.0F;
+uint32_t last_activity_ms = 0;
+uint32_t idle_started_ms = 0;
+uint32_t next_idle_move_ms = 0;
+uint32_t last_idle_render_ms = 0;
+uint32_t idle_motion_settle_until_ms = 0;
+int idle_gaze_x = 0;
+int idle_gaze_y = 0;
+uint8_t voice_activity_frames = 0;
 uint16_t camera_wipe_cache[128 * 96];
 String emotion = "neutral";
 String detail = "Connecting to Wi-Fi";
@@ -77,6 +88,15 @@ constexpr uint32_t kCameraFrameIntervalMs = 125;
 constexpr uint32_t kCameraSpeakingFrameIntervalMs = 500;
 constexpr uint32_t kFaceLostBeforeSearchMs = 8000;
 constexpr uint32_t kSearchStepIntervalMs = 1200;
+constexpr uint32_t kIdleAfterSilenceMs = 30'000;
+constexpr uint32_t kSleepAfterIdleMs = 5 * 60'000;
+constexpr uint32_t kIdleMoveMinIntervalMs = 2000;
+constexpr uint32_t kIdleMoveMaxIntervalMs = 15'000;
+constexpr uint32_t kIdleMotionSettleMs = 1200;
+constexpr int kIdleMoveMinSpeed = 180;
+constexpr int kIdleMoveMaxSpeed = 650;
+constexpr uint16_t kVoiceActivityMean = 350;
+constexpr uint8_t kVoiceActivityConfirmFrames = 3;
 constexpr uint8_t kFaceLockConfirmFrames = 3;
 constexpr float kTrackingLeadSeconds = 0.18F;
 // The CoreS3 camera sits below the neck pivot, so the image centre needs a
@@ -97,6 +117,8 @@ void handle_state(AgentState next);
 void render_ui(bool should_present = true);
 void report_target_network_visibility();
 void draw_cached_camera_wipe();
+void note_activity(bool return_home = true);
+void update_idle_behavior();
 
 // CoreS3's built-in GC0308 uses a dedicated parallel camera bus.  The camera
 // owns the internal I2C pins while it is active, so M5.In_I2C is released just
@@ -464,61 +486,147 @@ void render_status() {
   draw_action_button(color);
 }
 
+void render_cat_eye(int center_x, int center_y, uint32_t color) {
+  ui_sprite.fillRoundRect(center_x - 24, center_y - 29, 48, 58, 22, color);
+  ui_sprite.fillRoundRect(center_x - 8, center_y - 17, 16, 36, 8, TFT_BLACK);
+  ui_sprite.fillCircle(center_x - 9, center_y - 13, 5, TFT_WHITE);
+  ui_sprite.fillCircle(center_x + 7, center_y + 10, 3, TFT_WHITE);
+}
+
+void render_listening_cat_eye(int center_x, int center_y) {
+  ui_sprite.fillRoundRect(center_x - 27, center_y - 32, 54, 64, 25, TFT_PINK);
+  ui_sprite.fillRoundRect(center_x - 23, center_y - 28, 46, 56, 21, TFT_WHITE);
+  ui_sprite.fillCircle(center_x, center_y + 2, 13, TFT_BLACK);
+  ui_sprite.fillCircle(center_x - 6, center_y - 6, 5, TFT_WHITE);
+  ui_sprite.fillCircle(center_x + 5, center_y + 8, 3, TFT_WHITE);
+}
+
+void render_searching_cat_eye(int center_x, int center_y, int pupil_shift) {
+  ui_sprite.fillRoundRect(center_x - 24, center_y - 27, 48, 54, 21, TFT_YELLOW);
+  ui_sprite.fillRoundRect(center_x + pupil_shift - 6, center_y - 15, 12, 32, 6, TFT_BLACK);
+  ui_sprite.fillCircle(center_x + pupil_shift - 6, center_y - 11, 4, TFT_WHITE);
+}
+
+void render_idle_cat_eye(int center_x, int center_y) {
+  ui_sprite.fillRoundRect(center_x - 24, center_y - 29, 48, 58, 22, TFT_PINK);
+  ui_sprite.fillRoundRect(center_x - 7 + idle_gaze_x, center_y - 16 + idle_gaze_y, 14, 34, 7,
+                          TFT_BLACK);
+  ui_sprite.fillCircle(center_x - 5 + idle_gaze_x, center_y - 11 + idle_gaze_y, 4, TFT_WHITE);
+}
+
 void render_face_mouth() {
   const uint32_t color = state_color();
+  const uint32_t mouth_color = TFT_PINK;
   const int center_x = ui_sprite.width() / 2;
-  ui_sprite.fillRect(center_x - 48, 140, 96, 46, TFT_BLACK);
+  ui_sprite.fillRect(center_x - 78, 134, 156, 58, TFT_BLACK);
+
+  // Redraw the muzzle on every lip-sync frame so the animated mouth remains
+  // one coherent cat expression instead of floating below the nose.
+  ui_sprite.fillCircle(center_x - 17, 153, 22, TFT_WHITE);
+  ui_sprite.fillCircle(center_x + 17, 153, 22, TFT_WHITE);
+  ui_sprite.fillTriangle(center_x - 9, 143, center_x + 9, 143, center_x, 151, TFT_PINK);
+  ui_sprite.drawLine(center_x, 151, center_x, 157, TFT_DARKGREY);
+
+  for (int offset : {-8, 8}) {
+    ui_sprite.drawLine(center_x - 30, 153 + offset, center_x - 72, 147 + offset, TFT_LIGHTGREY);
+    ui_sprite.drawLine(center_x + 30, 153 + offset, center_x + 72, 147 + offset, TFT_LIGHTGREY);
+  }
+
   if (state == AgentState::Speaking) {
-    const int mouth_height = 12 + ((millis() / 130) % 3) * 10;
-    ui_sprite.fillRoundRect(center_x - 34, 160 - mouth_height / 2, 68, mouth_height, 8,
-                             color);
-  } else if (state == AgentState::Listening) {
-    ui_sprite.drawRoundRect(center_x - 32, 152, 64, 26, 12, color);
-  } else if (state != AgentState::Error && state != AgentState::Disconnected &&
-             state != AgentState::Thinking && state != AgentState::Searching) {
+    static constexpr int kMouthOpenHeights[] = {0, 7, 12, 7};
+    const int mouth_height = kMouthOpenHeights[(millis() / 110) % 4];
+    ui_sprite.drawArc(center_x - 10, 157, 11, 10, 0, 90, mouth_color);
+    ui_sprite.drawArc(center_x + 10, 157, 11, 10, 90, 180, mouth_color);
+    if (mouth_height > 0) {
+      const int mouth_width = 20 + mouth_height;
+      ui_sprite.fillRoundRect(center_x - mouth_width / 2, 160, mouth_width, mouth_height,
+                              mouth_height / 2, TFT_BLACK);
+      ui_sprite.drawRoundRect(center_x - mouth_width / 2, 160, mouth_width, mouth_height,
+              mouth_height / 2, mouth_color);
+      if (mouth_height == 12) {
+        ui_sprite.fillRoundRect(center_x - 7, 167, 14, 4, 2, TFT_PINK);
+      }
+    }
+  } else if (state == AgentState::Searching) {
+    ui_sprite.drawLine(center_x - 13, 160, center_x, 164, mouth_color);
+    ui_sprite.drawLine(center_x, 164, center_x + 13, 160, mouth_color);
+  } else if (state == AgentState::Thinking) {
+    const int active_dot = (millis() / 180) % 3;
+    for (int dot = 0; dot < 3; ++dot) {
+      ui_sprite.fillCircle(center_x - 12 + dot * 12, 171, dot == active_dot ? 4 : 2, color);
+    }
+  } else if (state == AgentState::Error || state == AgentState::Disconnected) {
+    ui_sprite.drawArc(center_x, 176, 22, 14, 200, 340, TFT_RED);
+  } else {
     if (emotion == "sad") {
-      ui_sprite.drawLine(center_x - 32, 172, center_x, 156, TFT_SKYBLUE);
-      ui_sprite.drawLine(center_x, 156, center_x + 32, 172, TFT_SKYBLUE);
+      ui_sprite.drawArc(center_x, 176, 25, 16, 198, 342, TFT_SKYBLUE);
     } else if (emotion == "angry") {
-      ui_sprite.fillRoundRect(center_x - 26, 160, 52, 8, 4, TFT_ORANGE);
+      ui_sprite.fillRoundRect(center_x - 20, 163, 40, 7, 3, TFT_ORANGE);
     } else if (emotion == "surprised") {
-      ui_sprite.drawCircle(center_x, 164, 14, color);
+      ui_sprite.drawCircle(center_x, 170, 11, mouth_color);
     } else if (emotion == "happy") {
-      ui_sprite.drawLine(center_x - 34, 154, center_x, 174, TFT_PINK);
-      ui_sprite.drawLine(center_x, 174, center_x + 34, 154, TFT_PINK);
+      ui_sprite.drawArc(center_x - 10, 157, 11, 10, 0, 90, TFT_PINK);
+      ui_sprite.drawArc(center_x + 10, 157, 11, 10, 90, 180, TFT_PINK);
     } else {
-      ui_sprite.drawLine(center_x - 26, 164, center_x, 170, color);
-      ui_sprite.drawLine(center_x, 170, center_x + 26, 164, color);
+      ui_sprite.drawArc(center_x - 10, 157, 11, 10, 0, 90, mouth_color);
+      ui_sprite.drawArc(center_x + 10, 157, 11, 10, 90, 180, mouth_color);
     }
   }
 }
 
 void render_search_animation_frame() {
   const int center_x = ui_sprite.width() / 2;
-  const int sway = static_cast<int>((millis() / 260) % 3) - 1;
-  const int pulse = static_cast<int>((millis() / 260) % 3);
+  const int phase = static_cast<int>((millis() / 220) % 4);
+  static constexpr int kPupilShifts[] = {-7, 0, 7, 0};
+  const int pupil_shift = kPupilShifts[phase];
+  const int bob = phase == 1 ? 2 : 0;
   ui_sprite.fillRect(12, 48, ui_sprite.width() - 24, 142, TFT_BLACK);
 
-  // Soft focused eyes: a gentle, studious look rather than rapid eye movement.
-  ui_sprite.fillRoundRect(50, 74, 68, 32, 15, TFT_CYAN);
-  ui_sprite.fillRoundRect(202, 74, 68, 32, 15, TFT_CYAN);
-  ui_sprite.fillCircle(86, 91 + sway, 5, TFT_BLACK);
-  ui_sprite.fillCircle(234, 91 + sway, 5, TFT_BLACK);
-  ui_sprite.drawLine(54, 66, 112, 70, TFT_LIGHTGREY);
-  ui_sprite.drawLine(206, 70, 264, 66, TFT_LIGHTGREY);
+  render_searching_cat_eye(center_x - 64, 96 + bob, pupil_shift);
+  render_searching_cat_eye(center_x + 64, 96 + bob, pupil_shift);
+  ui_sprite.drawLine(center_x - 90, 65 + bob, center_x - 44, 72 + bob, TFT_PINK);
+  ui_sprite.drawLine(center_x + 90, 65 + bob, center_x + 44, 72 + bob, TFT_PINK);
+  render_face_mouth();
 
-  // A rounded research note and a small moving magnifier read as "working".
-  ui_sprite.fillRoundRect(102, 120, 76, 48, 8, TFT_DARKGREY);
-  ui_sprite.drawRoundRect(102, 120, 76, 48, 8, TFT_LIGHTGREY);
-  ui_sprite.drawLine(116, 134, 164, 134, TFT_LIGHTGREY);
-  ui_sprite.drawLine(116, 145, 154, 145, TFT_LIGHTGREY);
-  ui_sprite.drawLine(116, 156, 146, 156, TFT_LIGHTGREY);
-  const int glass_x = 206 + sway * 4;
-  ui_sprite.drawCircle(glass_x, 142, 15, TFT_PINK);
-  ui_sprite.drawLine(glass_x + 11, 153, glass_x + 25, 167, TFT_PINK);
-  for (int dot = 0; dot < 3; ++dot) {
-    ui_sprite.fillCircle(center_x - 14 + dot * 14, 184, dot == pulse ? 4 : 2, TFT_PINK);
-  }
+  const int glass_x = 244 + pupil_shift / 2;
+  const int glass_y = 143 + bob;
+  ui_sprite.drawCircle(glass_x, glass_y, 20, TFT_PINK);
+  ui_sprite.drawCircle(glass_x, glass_y, 17, TFT_WHITE);
+  ui_sprite.drawLine(glass_x + 14, glass_y + 14, glass_x + 34, glass_y + 34, TFT_PINK);
+  ui_sprite.drawLine(glass_x + 16, glass_y + 12, glass_x + 36, glass_y + 32, TFT_PINK);
+  ui_sprite.fillCircle(226, 169 + bob, 12, TFT_WHITE);
+  ui_sprite.fillCircle(220, 160 + bob, 4, TFT_PINK);
+  ui_sprite.fillCircle(228, 157 + bob, 4, TFT_PINK);
+  ui_sprite.fillCircle(236, 161 + bob, 4, TFT_PINK);
+
+  ui_sprite.fillCircle(45, 77 + phase * 2, 4, TFT_SKYBLUE);
+  ui_sprite.fillTriangle(41, 77 + phase * 2, 49, 77 + phase * 2, 45, 66 + phase * 2,
+                         TFT_SKYBLUE);
+}
+
+void render_idle_face() {
+  const int center_x = ui_sprite.width() / 2;
+  render_idle_cat_eye(center_x - 64, 98);
+  render_idle_cat_eye(center_x + 64, 98);
+  render_face_mouth();
+}
+
+void render_sleeping_face() {
+  const int center_x = ui_sprite.width() / 2;
+  const int eye_y = 100;
+  const int breathe = (millis() / 700) % 2;
+  ui_sprite.drawArc(center_x - 64, eye_y, 24, 12, 20, 160, TFT_PINK);
+  ui_sprite.drawArc(center_x + 64, eye_y, 24, 12, 20, 160, TFT_PINK);
+  render_face_mouth();
+  ui_sprite.fillCircle(center_x - 104, 146 + breathe, 7, TFT_PINK);
+  ui_sprite.fillCircle(center_x + 104, 146 + breathe, 7, TFT_PINK);
+  ui_sprite.setTextColor(TFT_SKYBLUE, TFT_BLACK);
+  ui_sprite.setTextSize(1);
+  ui_sprite.setCursor(245, 72 - breathe * 2);
+  ui_sprite.print("z");
+  ui_sprite.setTextSize(2);
+  ui_sprite.setCursor(265, 52 - breathe * 3);
+  ui_sprite.print("Z");
 }
 
 void render_face(bool show_overlay) {
@@ -532,22 +640,31 @@ void render_face(bool show_overlay) {
     ui_sprite.setCursor(8, 34);
     ui_sprite.print(state_label(state));
   }
-  if (state == AgentState::Error || state == AgentState::Disconnected) {
+  if (idle_mode == IdleMode::Sleeping) {
+    render_sleeping_face();
+  } else if (idle_mode == IdleMode::LookingAround) {
+    render_idle_face();
+  } else if (state == AgentState::Error || state == AgentState::Disconnected) {
     for (int side : {-1, 1}) {
       const int x = center_x + side * eye_offset;
       ui_sprite.drawLine(x - 16, eye_y - 16, x + 16, eye_y + 16, color);
       ui_sprite.drawLine(x + 16, eye_y - 16, x - 16, eye_y + 16, color);
     }
-    ui_sprite.drawLine(center_x - 34, 166, center_x + 34, 166, color);
+    render_face_mouth();
   } else if (state == AgentState::Searching) {
     render_search_animation_frame();
   } else if (state == AgentState::Thinking) {
     const int bob = (millis() / 180) % 3;
-    ui_sprite.fillCircle(center_x - eye_offset, eye_y + bob, 13, color);
-    ui_sprite.fillCircle(center_x + eye_offset, eye_y - bob, 13, color);
-    ui_sprite.drawCircle(center_x, 164, 18, color);
+    render_cat_eye(center_x - eye_offset, eye_y + bob, color);
+    render_cat_eye(center_x + eye_offset, eye_y - bob, color);
+    render_face_mouth();
   } else {
-    if (emotion == "sad") {
+    if (state == AgentState::Listening) {
+      render_listening_cat_eye(center_x - eye_offset, eye_y);
+      render_listening_cat_eye(center_x + eye_offset, eye_y);
+      ui_sprite.fillCircle(center_x - 104, 145, 8, TFT_PINK);
+      ui_sprite.fillCircle(center_x + 104, 145, 8, TFT_PINK);
+    } else if (emotion == "sad") {
       ui_sprite.fillRoundRect(center_x - eye_offset - 18, eye_y - 18, 36, 34, 16, color);
       ui_sprite.fillRoundRect(center_x + eye_offset - 18, eye_y - 18, 36, 34, 16, color);
       ui_sprite.fillCircle(center_x - eye_offset + 7, eye_y - 3, 5, TFT_BLACK);
@@ -576,13 +693,11 @@ void render_face(bool show_overlay) {
       ui_sprite.drawLine(center_x + eye_offset - 22, eye_y, center_x + eye_offset + 22, eye_y,
                           color);
     } else {
-      ui_sprite.fillRoundRect(center_x - eye_offset - 22, eye_y - 26, 44, 52, 20, color);
-      ui_sprite.fillRoundRect(center_x + eye_offset - 22, eye_y - 26, 44, 52, 20, color);
-      ui_sprite.fillCircle(center_x - eye_offset + 8, eye_y - 8, 6, TFT_BLACK);
-      ui_sprite.fillCircle(center_x + eye_offset + 8, eye_y - 8, 6, TFT_BLACK);
+      render_cat_eye(center_x - eye_offset, eye_y, color);
+      render_cat_eye(center_x + eye_offset, eye_y, color);
       if (emotion == "happy") {
-        ui_sprite.fillCircle(center_x - 104, 152, 12, TFT_PINK);
-        ui_sprite.fillCircle(center_x + 104, 152, 12, TFT_PINK);
+        ui_sprite.fillCircle(center_x - 104, 145, 11, TFT_PINK);
+        ui_sprite.fillCircle(center_x + 104, 145, 11, TFT_PINK);
       }
     }
     render_face_mouth();
@@ -763,9 +878,69 @@ void handle_notice(const char* title, const char* message) {
   render_ui();
 }
 
+void sync_ui_mode() {
+  if (!relay.connected()) return;
+  relay.send_ui_mode(ui_page == UiPage::Face ? "face" : "standard");
+}
+
+void note_activity(bool return_home) {
+  last_activity_ms = millis();
+  if (idle_mode == IdleMode::Active) return;
+  idle_mode = IdleMode::Active;
+  idle_gaze_x = 0;
+  idle_gaze_y = 0;
+  voice_activity_frames = 0;
+  if (return_home && !camera_wipe_visible) M5StackChan.Motion.goHome(350);
+  if (ui_page == UiPage::Face) render_ui();
+}
+
+void update_idle_behavior() {
+  const uint32_t now = millis();
+  const bool can_idle = (state == AgentState::Ready || state == AgentState::Listening) &&
+                        !camera_wipe_visible;
+  if (!can_idle) {
+    if (idle_mode != IdleMode::Active) note_activity(false);
+    last_activity_ms = now;
+    return;
+  }
+
+  if (idle_mode == IdleMode::Active) {
+    if (now - last_activity_ms < kIdleAfterSilenceMs) return;
+    idle_mode = IdleMode::LookingAround;
+    idle_started_ms = now;
+    next_idle_move_ms = now;
+    if (ui_page == UiPage::Face) render_ui();
+  }
+
+  if (idle_mode == IdleMode::LookingAround && now - idle_started_ms >= kSleepAfterIdleMs) {
+    idle_mode = IdleMode::Sleeping;
+    idle_gaze_x = 0;
+    idle_gaze_y = 0;
+    M5StackChan.Motion.goHome(700);
+    if (ui_page == UiPage::Face) render_ui();
+    return;
+  }
+
+  if (idle_mode == IdleMode::LookingAround && now >= next_idle_move_ms) {
+    const int yaw = random(-700, 701);
+    const int pitch = random(300, 651);
+    idle_gaze_x = map(yaw, -700, 700, -9, 9);
+    idle_gaze_y = map(pitch, 300, 650, -5, 5);
+    M5StackChan.Motion.move(yaw, pitch, random(kIdleMoveMinSpeed, kIdleMoveMaxSpeed + 1));
+    idle_motion_settle_until_ms = now + kIdleMotionSettleMs;
+    voice_activity_frames = 0;
+    next_idle_move_ms = now + random(kIdleMoveMinIntervalMs, kIdleMoveMaxIntervalMs + 1);
+    if (ui_page == UiPage::Face) render_ui();
+  } else if (idle_mode == IdleMode::Sleeping && now - last_idle_render_ms >= 700) {
+    last_idle_render_ms = now;
+    if (ui_page == UiPage::Face) render_ui();
+  }
+}
+
 void handle_touch() {
   if (!M5.Touch.getCount()) return;
   const auto touch = M5.Touch.getDetail();
+  note_activity();
 
   if (touch.wasFlicked() && abs(touch.distanceX()) > 50 &&
       abs(touch.distanceX()) > abs(touch.distanceY())) {
@@ -775,6 +950,7 @@ void handle_touch() {
     ui_page = static_cast<UiPage>(page);
     face_overlay_visible = false;
     camera_wipe_visible = false;
+    sync_ui_mode();
     render_ui();
     return;
   }
@@ -785,6 +961,7 @@ void handle_touch() {
     ui_page = static_cast<UiPage>(std::min(2, touch.x / (ui_sprite.width() / 3)));
     face_overlay_visible = false;
     camera_wipe_visible = false;
+    sync_ui_mode();
     render_ui();
     return;
   }
@@ -863,12 +1040,14 @@ void handle_touch() {
 
 void setup() {
   Serial.begin(115200);
+  randomSeed(esp_random());
   M5StackChan.begin();
   M5StackChan.Motion.setAutoAngleSyncEnabled(false);
   audio.begin();
   ui_sprite.setColorDepth(16);
   ui_sprite.setPsram(true);
   ui_sprite.createSprite(M5.Display.width(), M5.Display.height());
+  last_activity_ms = millis();
   handle_state(AgentState::Connecting);
   connect_wifi();
 
@@ -890,9 +1069,13 @@ void loop() {
   maintain_wifi();
   start_relay_when_wifi_ready();
   relay.loop();
+  static bool relay_was_connected = false;
+  if (relay.connected() && !relay_was_connected) sync_ui_mode();
+  relay_was_connected = relay.connected();
   audio.loop();
   handle_touch();
   apply_espnow_remote();
+  update_idle_behavior();
 
   if (ui_page == UiPage::Face) {
     if (face_overlay_visible && millis() >= face_overlay_until) {
@@ -900,7 +1083,7 @@ void loop() {
       render_ui();
     }
     static uint32_t last_lip_render = 0;
-    if (state == AgentState::Speaking && millis() - last_lip_render >= 130) {
+    if (state == AgentState::Speaking && millis() - last_lip_render >= 110) {
       last_lip_render = millis();
       // Keep the last camera frame in the PIP while lip sync updates.  A
       // mouth-only transfer would otherwise erase the PIP until the next
@@ -924,6 +1107,18 @@ void loop() {
   if (relay.connected() && state == AgentState::Listening && conversation_active) {
     const size_t captured = audio.capture(capture_buffer, kFrameSamples);
     if (captured > 0) {
+      uint32_t magnitude_sum = 0;
+      for (size_t index = 0; index < captured; ++index) {
+        const int16_t sample = capture_buffer[index];
+        magnitude_sum += sample == INT16_MIN ? INT16_MAX : abs(sample);
+      }
+      const bool voice_detected = magnitude_sum / captured >= kVoiceActivityMean;
+      if (idle_mode != IdleMode::Active && millis() >= idle_motion_settle_until_ms &&
+          voice_detected) {
+        if (++voice_activity_frames >= kVoiceActivityConfirmFrames) note_activity();
+      } else {
+        voice_activity_frames = 0;
+      }
       relay.send_audio(capture_buffer, captured);
     }
   }

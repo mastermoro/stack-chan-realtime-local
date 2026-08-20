@@ -22,6 +22,7 @@ class RelayClient {
   bool connected() const { return connected_; }
   void send_audio(const int16_t* samples, size_t sample_count);
   void send_control(const char* type);
+  void send_ui_mode(const char* mode);
   void on_audio(AudioHandler handler) { audio_handler_ = std::move(handler); }
   void on_state(StateHandler handler) { state_handler_ = std::move(handler); }
   void on_notice(NoticeHandler handler) { notice_handler_ = std::move(handler); }

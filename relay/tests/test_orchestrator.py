@@ -40,10 +40,15 @@ class FakeConnection:
         self.followups = 0
         self.cancelled = 0
         self.truncations: list[dict[str, object]] = []
+        self.session_updates: list[dict[str, object]] = []
         self.conversation = SimpleNamespace(
             item=SimpleNamespace(create=self.create_item, truncate=self.truncate_item)
         )
         self.response = SimpleNamespace(create=self.create_followup, cancel=self.cancel_response)
+        self.session = SimpleNamespace(update=self.update_session)
+
+    async def update_session(self, *, session: dict[str, object]) -> None:
+        self.session_updates.append(session)
 
     async def create_item(self, *, item: dict[str, object]) -> None:
         self.items.append(item)
@@ -232,3 +237,26 @@ def test_reconnect_clears_cancel_state_from_the_previous_foundry_socket() -> Non
     assert not session._output_suppressed
     assert not session._cancellation_pending
     assert session._announced_output_item is None
+
+
+def test_ui_mode_updates_realtime_instructions() -> None:
+    async def scenario() -> None:
+        websocket = FakeWebSocket()
+        session = RelaySession(websocket, "stackchan-001", Settings())
+        connection = FakeConnection()
+
+        await session._handle_device_control(
+            connection, '{"type":"ui.mode","mode":"face"}'
+        )
+
+        assert session._face_mode
+        assert "にゃん" in connection.session_updates[-1]["instructions"]
+
+        await session._handle_device_control(
+            connection, '{"type":"ui.mode","mode":"standard"}'
+        )
+
+        assert not session._face_mode
+        assert "にゃん" not in connection.session_updates[-1]["instructions"]
+
+    asyncio.run(scenario())

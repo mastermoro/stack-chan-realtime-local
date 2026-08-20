@@ -55,3 +55,11 @@ def test_session_config_adds_registered_windows_tools() -> None:
         "set_emotion",
         "open_browser_url",
     ]
+
+
+def test_instructions_add_cat_speech_only_in_face_mode() -> None:
+    client = FoundryRealtimeClient(Settings())
+
+    assert "にゃん" not in client.instructions()
+    assert "にゃん" in client.instructions(face_mode=True)
+    assert "にゃ" in client.instructions(face_mode=True)

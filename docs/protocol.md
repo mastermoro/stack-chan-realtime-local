@@ -47,6 +47,7 @@ Must be the first text frame after connection.
 {"type":"audio.stop"}
 {"type":"response.cancel"}
 {"type":"conversation.pause","item_id":"item_123","content_index":0,"audio_end_ms":1500}
+{"type":"ui.mode","mode":"face"}
 {"type":"ping"}
 ```
 
@@ -60,6 +61,10 @@ When a WebSocket client has an output-playback position, it should include
 `item_id`, `content_index`, and `audio_end_ms`. The Relay cancels the active
 response and truncates the unheard audio from the conversation history. These
 three fields are optional for simple embedded clients.
+
+`ui.mode` accepts `standard` or `face`. The Relay updates the Realtime system
+instructions so Face mode uses the cat-like speaking style without resetting
+the conversation context.
 
 ## Relay -> Device JSON
 

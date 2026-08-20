@@ -55,6 +55,16 @@ void RelayClient::send_control(const char* type) {
   ws_.sendTXT(json);
 }
 
+void RelayClient::send_ui_mode(const char* mode) {
+  if (!connected_) return;
+  JsonDocument doc;
+  doc["type"] = "ui.mode";
+  doc["mode"] = mode;
+  String json;
+  serializeJson(doc, json);
+  ws_.sendTXT(json);
+}
+
 void RelayClient::send_notice(const char* title, const char* detail) {
   if (notice_handler_) notice_handler_(title, detail);
 }
