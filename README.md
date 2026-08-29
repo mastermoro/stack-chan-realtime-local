@@ -1,5 +1,7 @@
 # stack-chan-realtime-local
 
+日本語 | [English](README.en.md)
+
 Stack-chanから同じローカルネットワーク上のWindows PCへ接続し、そのPC上のRelayを経由してMicrosoft Foundry Realtime APIを利用する音声エージェントです。
 
 元の[`mastermoro/stack-chan-realtime`](https://github.com/mastermoro/stack-chan-realtime)をベースに、Relayの主な実行場所をAzure Container AppsからWindows PCへ移しました。Foundry Realtime、Responses APIのWeb検索、Stack-chanファームウェアは維持しています。
@@ -9,9 +11,9 @@ Stack-chanから同じローカルネットワーク上のWindows PCへ接続し
 ```text
 Stack-chan (CoreS3)
   ├─ PCM16 / 24 kHz / mono
-  └─ ws://Windows-PC:8080/v1/realtime
-                 |
-                 v
+  ├─ Wi-Fi WebSocket ───────────────────┐
+  └─ USBシリアル ─> Windows USBブリッジ ─┤
+                                        v
 Windows PC / Local Relay
   ├─ 端末認証・会話状態管理
   ├─ Foundry Realtime接続
@@ -136,6 +138,16 @@ Stack-chanのSettings（Volume調整）ページにある`AUTO`、`WI-FI`、`USB
 ファームウェア書き込み時は`deploy-from-relay.ps1`がManager管理下のUSBブリッジを一時停止してCOMポートを解放し、終了後に自動再開します。手動でPlatformIOの書き込みやシリアルモニターを使う場合は、Managerの「ブリッジを停止」を先に押してください。
 
 設計判断、ハードウェア検証条件、受け入れ試験は[`docs/usb-relay-mode-plan.md`](docs/usb-relay-mode-plan.md)に記録しています。
+
+## Stack-chanの操作
+
+- Face画面をタップすると会話を開始し、会話中にもう一度タップすると一時停止します。
+- Face画面で待機中に30秒間操作や発話がないと、猫顔で周囲を見回します。その状態が
+  5分続くと睡眠表示へ移り、タッチまたは発話で通常表示へ戻ります。
+- CoreS3上面を1回タップするとFace画面へ移動して会話を開始します。
+- CoreS3上面を2秒以内に2回タップすると会話と再生を止め、首を伏せたスリープ姿勢へ移ります。
+- Settingsの音量`-` / `+`はタップで1段階、長押しで連続調整できます。
+- Face画面左上のカメラ領域をタップすると、顔追跡の表示と停止を切り替えます。
 
 ## ブラウザFunction
 

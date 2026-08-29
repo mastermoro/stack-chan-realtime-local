@@ -1,24 +1,26 @@
-# Initial GitHub roadmap
+**日本語** | [English](en/roadmap.md)
 
-These items should become GitHub Issues after the remote repository is created.
+# 初期 GitHub ロードマップ
 
-## P0 - Bootstrap / validation
+以下の項目は、リモートリポジトリの作成後に GitHub Issues として登録する。
 
-1. Deploy first Container Apps revision and measure first-audio latency.
-2. Validate Relay -> `gpt-realtime-2.1` session with Managed Identity in the deployed environment.
-3. Validate Realtime `search_web` function call -> `gpt-5.6-terra` Responses API `web_search` -> citation return in the deployed environment.
+## P0 - ブートストラップ / 検証
 
-## P1 - Production hardening
+1. 最初の Container Apps リビジョンをデプロイし、最初の音声が届くまでのレイテンシを測定する。
+2. デプロイ先の環境で、Managed Identity を使用した Relay -> `gpt-realtime-2.1` セッションを検証する。
+3. デプロイ先の環境で、Realtime の `search_web` 関数呼び出し -> `gpt-5.6-terra` Responses API の `web_search` -> 引用情報の返却、という一連の処理を検証する。
 
-1. Replace static device token map with managed device credential lifecycle.
-2. Add Application Insights custom metrics and correlation IDs.
-3. Add rate limits and maximum concurrent session controls.
-4. Add Web Search query privacy filtering and domain policy profiles.
-5. Add long-running session soak tests and metrics for Relay/Realtime reconnects.
+## P1 - 本番環境向けの堅牢化
 
-## P2 - Conversation quality
+1. 静的なデバイストークンマップを、管理されたデバイス認証情報ライフサイクルに置き換える。
+2. Application Insights のカスタムメトリクスと相関 ID を追加する。
+3. レート制限と最大同時セッション数の制御を追加する。
+4. Web Search クエリのプライバシーフィルタリングとドメインポリシープロファイルを追加する。
+5. 長時間セッションのソークテストと、Relay / Realtime の再接続に関するメトリクスを追加する。
 
-1. Tune Server VAD threshold and silence duration on actual Stack-chan hardware.
-2. Tune the implemented expression mapping and search animation from on-device feedback.
-3. Add barge-in with robust response cancellation and playback truncation.
-4. Evaluate AEC and full-duplex mode.
+## P2 - 会話品質
+
+1. 実際の Stack-chan ハードウェア上で Server VAD のしきい値と無音時間を調整する。
+2. デバイス上のフィードバックに基づいて、実装済みの表情マッピングと検索アニメーションを調整する。
+3. 堅牢な応答キャンセルと再生位置での切り詰めに対応したバージインを追加する。
+4. AEC と全二重モードを評価する。

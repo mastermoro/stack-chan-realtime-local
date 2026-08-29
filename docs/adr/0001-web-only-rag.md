@@ -1,14 +1,16 @@
-# ADR-0001: Use Web Search as the only initial RAG knowledge source
+**日本語** | [English](../en/adr/0001-web-only-rag.md)
 
-Status: Accepted
+# ADR-0001: 初期の RAG ナレッジソースを Web Search のみにする
 
-## Decision
+ステータス: 承認済み
 
-The initial release uses Microsoft Foundry Responses API `web_search` as its only external knowledge source. Azure AI Search, vector databases, embeddings, document ingestion, and internal knowledge indexes are out of scope.
+## 決定
 
-## Consequences
+初期リリースでは、唯一の外部ナレッジソースとして Microsoft Foundry Responses API の `web_search` を使用する。Azure AI Search、ベクトルデータベース、埋め込み、ドキュメント取り込み、社内ナレッジインデックスはスコープ外とする。
 
-- Initial infrastructure and operations are substantially simpler.
-- Current/public information can be retrieved with citations.
-- Queries sent to web search must not contain confidential/internal data without an explicit later policy change.
-- The Relay keeps a generic tool boundary so internal RAG or MCP can be added later without changing the Stack-chan protocol.
+## 結果
+
+- 初期のインフラストラクチャと運用が大幅に簡素化される。
+- 最新情報や公開情報を引用付きで取得できる。
+- Web Search に送信するクエリには、後から明示的にポリシーを変更しない限り、機密情報や社内情報を含めてはならない。
+- Relay は汎用的なツール境界を維持するため、Stack-chan プロトコルを変更せずに、社内 RAG や MCP を後から追加できる。
