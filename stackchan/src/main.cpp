@@ -61,6 +61,9 @@ uint32_t idle_motion_settle_until_ms = 0;
 int idle_gaze_x = 0;
 int idle_gaze_y = 0;
 uint8_t voice_activity_frames = 0;
+uint32_t last_top_tap_ms = 0;
+uint32_t next_volume_repeat_ms = 0;
+bool volume_hold_adjusted = false;
 uint16_t camera_wipe_cache[128 * 96];
 String emotion = "neutral";
 String detail = "Connecting to Wi-Fi";
@@ -101,8 +104,12 @@ constexpr uint32_t kSleepAfterIdleMs = 5 * 60'000;
 constexpr uint32_t kIdleMoveMinIntervalMs = 2000;
 constexpr uint32_t kIdleMoveMaxIntervalMs = 15'000;
 constexpr uint32_t kIdleMotionSettleMs = 1200;
+constexpr uint32_t kTopDoubleTapMs = 2000;
+constexpr uint32_t kVolumeHoldDelayMs = 500;
+constexpr uint32_t kVolumeRepeatIntervalMs = 120;
 constexpr int kIdleMoveMinSpeed = 180;
 constexpr int kIdleMoveMaxSpeed = 650;
+constexpr int kSleepingPitch = 50;
 constexpr uint16_t kVoiceActivityMean = 350;
 constexpr uint8_t kVoiceActivityConfirmFrames = 3;
 constexpr uint8_t kFaceLockConfirmFrames = 3;
@@ -127,6 +134,7 @@ void report_target_network_visibility();
 void draw_cached_camera_wipe();
 void note_activity(bool return_home = true);
 void update_idle_behavior();
+void handle_top_touch();
 void manage_connection();
 void set_connection_mode(ConnectionMode mode);
 void maintain_wifi();
@@ -1102,10 +1110,88 @@ void update_idle_behavior() {
   }
 }
 
+void enter_face_listening() {
+  ui_page = UiPage::Face;
+  face_overlay_visible = false;
+  camera_wipe_visible = false;
+  note_activity(false);
+  sync_ui_mode();
+  if (!relay.connected()) {
+    render_ui();
+    return;
+  }
+  if (state == AgentState::Thinking || state == AgentState::Searching ||
+      state == AgentState::Speaking) {
+    audio.stop_playback();
+    relay.send_control("conversation.pause");
+  }
+  conversation_active = true;
+  start_listening();
+}
+
+void enter_face_sleeping() {
+  ui_page = UiPage::Face;
+  face_overlay_visible = false;
+  camera_wipe_visible = false;
+  conversation_active = false;
+  resume_after_response = false;
+  audio.set_capture_enabled(false);
+  audio.stop_playback();
+  if (relay.connected()) relay.send_control("conversation.pause");
+  if (state == AgentState::Listening || state == AgentState::Thinking ||
+      state == AgentState::Searching || state == AgentState::Speaking) {
+    state = AgentState::Ready;
+  }
+  idle_mode = IdleMode::Sleeping;
+  idle_gaze_x = 0;
+  idle_gaze_y = 0;
+  M5StackChan.Motion.move(0, kSleepingPitch, 700);
+  sync_ui_mode();
+  render_ui();
+}
+
+void handle_top_touch() {
+  auto& top_touch = M5StackChan.TouchSensor;
+  if (!top_touch.wasClicked()) return;
+
+  const uint32_t now = millis();
+  if (last_top_tap_ms != 0 && now - last_top_tap_ms <= kTopDoubleTapMs) {
+    last_top_tap_ms = 0;
+    enter_face_sleeping();
+  } else {
+    last_top_tap_ms = now;
+    enter_face_listening();
+  }
+}
+
+void adjust_volume(int delta) {
+  audio.set_volume(constrain(static_cast<int>(audio.volume()) + delta, 0, 255));
+  render_ui();
+}
+
 void handle_touch() {
-  if (!M5.Touch.getCount()) return;
+  if (!M5.Touch.getCount()) {
+    next_volume_repeat_ms = 0;
+    volume_hold_adjusted = false;
+    return;
+  }
   const auto touch = M5.Touch.getDetail();
   note_activity();
+
+  const bool volume_down = ui_page == UiPage::Settings && touch.y >= 84 &&
+                           touch.y <= 126 && touch.x < 76;
+  const bool volume_up = ui_page == UiPage::Settings && touch.y >= 84 &&
+                         touch.y <= 126 && touch.x > 244;
+  if ((volume_down || volume_up) && touch.isPressed()) {
+    const uint32_t now = millis();
+    if (next_volume_repeat_ms == 0) {
+      next_volume_repeat_ms = now + kVolumeHoldDelayMs;
+    } else if (now >= next_volume_repeat_ms) {
+      adjust_volume(volume_down ? -8 : 8);
+      volume_hold_adjusted = true;
+      next_volume_repeat_ms = now + kVolumeRepeatIntervalMs;
+    }
+  }
 
   if (touch.wasFlicked() && abs(touch.distanceX()) > 50 &&
       abs(touch.distanceX()) > abs(touch.distanceY())) {
@@ -1161,11 +1247,12 @@ void handle_touch() {
   }
 
   if (ui_page == UiPage::Settings && touch.y >= 84 && touch.y <= 126) {
-    int volume = audio.volume();
-    if (touch.x < 76) volume -= 8;
-    if (touch.x > 244) volume += 8;
-    audio.set_volume(constrain(volume, 0, 255));
-    render_ui();
+    if (!volume_hold_adjusted) {
+      if (touch.x < 76) adjust_volume(-8);
+      if (touch.x > 244) adjust_volume(8);
+    }
+    next_volume_repeat_ms = 0;
+    volume_hold_adjusted = false;
     return;
   }
 
@@ -1244,13 +1331,14 @@ void setup() {
 }
 
 void loop() {
-  M5.update();
+  M5StackChan.update();
   relay.loop();
   manage_connection();
   static bool relay_was_connected = false;
   if (relay.connected() && !relay_was_connected) sync_ui_mode();
   relay_was_connected = relay.connected();
   audio.loop();
+  handle_top_touch();
   handle_touch();
   apply_espnow_remote();
   update_idle_behavior();
