@@ -1,7 +1,10 @@
 import asyncio
+import json
 import logging
+import os
 import webbrowser
 from collections.abc import Callable
+from http.client import HTTPConnection
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -91,4 +94,24 @@ class LocalActionExecutor:
 
     @staticmethod
     def _open_browser(url: str) -> bool:
+        if os.name == "nt":
+            connection = HTTPConnection("127.0.0.1", 8787, timeout=6)
+            try:
+                connection.request(
+                    "POST",
+                    "/api/browser/open",
+                    body=json.dumps({"url": url}),
+                    headers={"Content-Type": "application/json"},
+                )
+                response = connection.getresponse()
+                response.read()
+                if response.status == 200:
+                    return True
+                logger.warning("browser broker rejected request status=%s", response.status)
+                return False
+            except OSError as exc:
+                logger.warning("browser broker request failed: %s", exc)
+                return False
+            finally:
+                connection.close()
         return webbrowser.open(url, new=2, autoraise=True)

@@ -1,6 +1,8 @@
 import asyncio
+import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlsplit
 
 if TYPE_CHECKING:
     from openai import OpenAI
@@ -9,6 +11,7 @@ from app.config.settings import Settings
 from app.protocol.messages import Source
 
 AZURE_OPENAI_SCOPE = "https://ai.azure.com/.default"
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -66,14 +69,22 @@ class WebSearchExecutor:
         response = self._client.responses.create(
             model=self._settings.azure_openai_responses_deployment,
             tools=[tool],
-            tool_choice="auto",
+            # search_web is already an explicit Realtime function call. Do not
+            # let the Responses model answer from memory without retrieving.
+            tool_choice="required",
             include=["web_search_call.action.sources"],
             input=(
                 "次の質問についてWeb検索を行い、音声会話に戻しやすい簡潔な日本語で回答してください。"
                 "事実は検索結果に基づき、推測で補完しないでください。\n\n質問: " + query
             ),
         )
-        return self.parse_response(response)
+        result = self.parse_response(response)
+        logger.info(
+            "web search completed answer_chars=%s sources=%s",
+            len(result.answer),
+            len(result.sources),
+        )
+        return result
 
     def _user_location(self) -> dict[str, str]:
         location = {
@@ -89,26 +100,49 @@ class WebSearchExecutor:
 
     @staticmethod
     def parse_response(response: Any) -> WebSearchResult:
-        data = response.model_dump() if hasattr(response, "model_dump") else response
-        answer = getattr(response, "output_text", None) or data.get("output_text", "")
+        def field(value: Any, name: str, default: Any = None) -> Any:
+            if isinstance(value, dict):
+                return value.get(name, default)
+            return getattr(value, name, default)
+
+        answer = field(response, "output_text", "") or ""
+        output = field(response, "output")
+        if output is None and hasattr(response, "model_dump"):
+            # Compatibility for older SDK response objects. Current Azure
+            # objects expose typed output directly; model_dump on those emits
+            # misleading warnings for ActionSearch.
+            data = response.model_dump()
+            output = data.get("output", [])
+            answer = answer or data.get("output_text", "")
+        output = output or []
         sources: list[Source] = []
         seen: set[str] = set()
 
-        for item in data.get("output", []):
-            if item.get("type") != "message":
+        def add_source(value: Any) -> None:
+            url = str(field(value, "url", "") or "")
+            if not url or url in seen:
+                return
+            seen.add(url)
+            title = str(field(value, "title", "") or "")
+            if not title:
+                title = urlsplit(url).hostname or url
+            sources.append(Source(title=title, url=url))
+
+        for item in output:
+            item_type = field(item, "type", "")
+            if item_type == "web_search_call":
+                action = field(item, "action")
+                for source in field(action, "sources", []) or []:
+                    add_source(source)
                 continue
-            for content in item.get("content", []):
-                if content.get("type") != "output_text":
-                    continue
-                if not answer:
-                    answer = content.get("text", "")
-                for annotation in content.get("annotations", []):
-                    if annotation.get("type") != "url_citation":
+            if item_type == "message":
+                for content in field(item, "content", []) or []:
+                    if field(content, "type", "") != "output_text":
                         continue
-                    url = annotation.get("url", "")
-                    if not url or url in seen:
-                        continue
-                    seen.add(url)
-                    sources.append(Source(title=annotation.get("title", ""), url=url))
+                    if not answer:
+                        answer = field(content, "text", "") or ""
+                    for annotation in field(content, "annotations", []) or []:
+                        if field(annotation, "type", "") == "url_citation":
+                            add_source(annotation)
 
         return WebSearchResult(answer=answer.strip(), sources=sources)

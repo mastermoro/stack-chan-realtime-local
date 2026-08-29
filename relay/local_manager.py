@@ -18,6 +18,7 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 from app.config.settings import Settings
+from app.tools.local_actions import LocalActionError, LocalActionExecutor
 
 
 class LocalManagerError(RuntimeError):
@@ -180,6 +181,111 @@ class RelaySupervisor:
         return "\n".join(content.splitlines()[-lines:])
 
 
+class UsbBridgeSupervisor:
+    def __init__(self, relay_root: Path, *, log_directory: Path | None = None) -> None:
+        self._relay_root = relay_root
+        self._log_directory = log_directory or Path(tempfile.gettempdir()) / "stackchan-relay"
+        self._process: subprocess.Popen[bytes] | None = None
+        self._log_handle: BinaryIO | None = None
+        self._log_path: Path | None = None
+        self._status_path = self._log_directory / "usb-bridge-state.json"
+        self._started_at: datetime | None = None
+        self._last_exit_code: int | None = None
+        self._lock = threading.Lock()
+
+    @property
+    def _python_path(self) -> Path:
+        return self._relay_root / ".venv" / "Scripts" / "python.exe"
+
+    def status(self) -> dict[str, Any]:
+        with self._lock:
+            self._clean_up_finished_process()
+            return self._status()
+
+    def start(self) -> dict[str, Any]:
+        with self._lock:
+            self._clean_up_finished_process()
+            if self._process is not None:
+                return self._status()
+            if not self._python_path.is_file():
+                raise LocalManagerError("Relay virtual environment was not found.")
+
+            self._log_directory.mkdir(parents=True, exist_ok=True)
+            self._log_path = self._log_directory / "usb-bridge.log"
+            self._status_path.unlink(missing_ok=True)
+            self._log_handle = self._log_path.open("ab")
+            started_at = datetime.now(UTC)
+            self._log_handle.write(
+                f"\n--- USB bridge start requested at {started_at.isoformat()} ---\n".encode()
+            )
+            self._log_handle.flush()
+            self._process = subprocess.Popen(
+                [
+                    str(self._python_path),
+                    "-m",
+                    "app.usb.bridge",
+                    "--status-file",
+                    str(self._status_path),
+                ],
+                cwd=self._relay_root,
+                stdout=self._log_handle,
+                stderr=subprocess.STDOUT,
+            )
+            self._started_at = started_at
+            self._last_exit_code = None
+            return self._status()
+
+    def stop(self) -> dict[str, Any]:
+        with self._lock:
+            self._clean_up_finished_process()
+            if self._process is None:
+                return self._status()
+            self._process.terminate()
+            try:
+                self._process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self._process.kill()
+                self._process.wait(timeout=5)
+            self._clean_up_finished_process()
+            return self._status()
+
+    def read_logs(self, lines: int) -> dict[str, Any]:
+        with self._lock:
+            self._clean_up_finished_process()
+            if self._log_path is None or not self._log_path.is_file():
+                return {"text": "No managed USB bridge log is available yet."}
+            return {"text": RelaySupervisor._tail(self._log_path, lines)}
+
+    def _status(self) -> dict[str, Any]:
+        child_status: dict[str, Any] | None = None
+        if self._process is not None:
+            try:
+                payload = json.loads(self._status_path.read_text(encoding="utf-8"))
+                if isinstance(payload, dict):
+                    child_status = payload
+            except (FileNotFoundError, json.JSONDecodeError, OSError):
+                pass
+        return {
+            "running": self._process is not None,
+            "pid": self._process.pid if self._process is not None else None,
+            "started_at": self._started_at.isoformat() if self._started_at else None,
+            "last_exit_code": self._last_exit_code,
+            "bridge": child_status,
+        }
+
+    def _clean_up_finished_process(self) -> None:
+        if self._process is None:
+            return
+        return_code = self._process.poll()
+        if return_code is None:
+            return
+        self._last_exit_code = return_code
+        self._process = None
+        if self._log_handle is not None:
+            self._log_handle.close()
+            self._log_handle = None
+
+
 class HeadsetSupervisor:
     def __init__(self, relay_root: Path, *, log_directory: Path | None = None) -> None:
         self._relay_root = relay_root
@@ -311,6 +417,7 @@ class HeadsetSupervisor:
 
 RELAY_ROOT = Path(__file__).resolve().parent
 supervisor = RelaySupervisor(RELAY_ROOT)
+usb_bridge_supervisor = UsbBridgeSupervisor(RELAY_ROOT)
 headset_supervisor = HeadsetSupervisor(RELAY_ROOT)
 
 
@@ -319,12 +426,35 @@ class HeadsetStartRequest(BaseModel):
     output_device: int | None = None
 
 
+class BrowserOpenRequest(BaseModel):
+    url: str
+
+
+class BrowserBroker:
+    @staticmethod
+    def open(url: str) -> bool:
+        try:
+            process = subprocess.Popen(["explorer.exe", url])
+        except OSError:
+            return False
+        try:
+            return process.wait(timeout=5) in {0, 1}
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+            return False
+
+
+browser_broker = BrowserBroker()
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
         headset_supervisor.stop()
+        usb_bridge_supervisor.stop()
         supervisor.stop()
 
 
@@ -350,6 +480,7 @@ async def dashboard() -> str:
     #refresh { background: #93c5fd; color: #172554; } #state { font-weight: 700; }
     #headset-start, #conversation-start { background: #c4b5fd; color: #2e1065; }
     #headset-stop, #conversation-pause { background: #fb7185; color: #500724; }
+    #usb-start { background: #67e8f9; color: #164e63; } #usb-stop { background: #fb7185; color: #500724; }
     select { min-width: 260px; padding: 8px; border-radius: 6px; }
     pre { min-height: 260px; max-height: 520px; overflow: auto; margin: 14px 0 0; padding: 14px; border-radius: 8px; background: #020617; color: #cbd5e1; white-space: pre-wrap; }
     .ok { color: #6ee7b7; } .idle { color: #fbbf24; } .error { color: #fda4af; }
@@ -369,6 +500,15 @@ async def dashboard() -> str:
   <section><div class="row"><h2>Relay ログ</h2><button id="relay-log-copy">ログをコピー</button></div>
     <pre id="logs" tabindex="0">読み込み中...</pre></section>
   <section>
+    <h2>USB ブリッジ</h2>
+    <p>接続された Stack-chan を検出し、USB 通信をローカル Relay へ中継します。書き込み時は停止して COM ポートを解放してください。</p>
+    <div class="row"><span>状態:</span><span id="usb-state">確認中...</span>
+      <button id="usb-start">ブリッジを開始</button><button id="usb-stop">ブリッジを停止</button></div>
+    <p id="usb-details"></p><p id="usb-message" class="error"></p>
+  </section>
+  <section><div class="row"><h2>USB ブリッジ ログ</h2><button id="usb-log-copy">ログをコピー</button></div>
+    <pre id="usb-logs" tabindex="0">読み込み中...</pre></section>
+  <section>
     <h2>ヘッドセット・テスト</h2>
     <p>Stack-chan と同じ半二重会話をテストします。テストの起動中はRelay接続と文脈を維持し、会話だけを開始・一時停止できます。</p>
     <div class="row"><label>入力 <select id="input-device"><option value="">既定のマイク</option></select></label>
@@ -385,6 +525,10 @@ async def dashboard() -> str:
     const details = document.querySelector('#details');
     const message = document.querySelector('#message');
     const logs = document.querySelector('#logs');
+    const usbState = document.querySelector('#usb-state');
+    const usbDetails = document.querySelector('#usb-details');
+    const usbMessage = document.querySelector('#usb-message');
+    const usbLogs = document.querySelector('#usb-logs');
     const headsetState = document.querySelector('#headset-state');
     const headsetDetails = document.querySelector('#headset-details');
     const headsetMessage = document.querySelector('#headset-message');
@@ -447,6 +591,20 @@ async def dashboard() -> str:
         headsetMessage.textContent = '';
       } catch (error) { headsetMessage.textContent = error.message; }
     }
+    async function refreshUsb(forceLogs = false) {
+      try {
+        const [status, log] = await Promise.all([request('/api/usb/status'), request('/api/usb/logs?lines=250')]);
+        const bridge = status.bridge;
+        const labels = {scanning: 'Stack-chan を検索中', connected: 'USB 接続中', relay_connecting: 'Relay 接続中', relay_connected: 'Relay 中継中'};
+        usbState.textContent = status.running ? (labels[bridge?.state] || '起動中') : '停止中';
+        usbState.className = bridge?.state === 'relay_connected' ? 'ok' : (status.running ? 'idle' : 'idle');
+        usbDetails.textContent = status.running
+          ? `PID ${status.pid} — ${bridge?.port || 'COM 検出待ち'} — ${bridge?.device_id || '端末待ち'} — 開始 ${status.started_at}`
+          : `最終終了コード: ${status.last_exit_code ?? 'なし'}`;
+        updateLog(usbLogs, log.text, forceLogs);
+        usbMessage.textContent = bridge?.last_error || '';
+      } catch (error) { usbMessage.textContent = error.message; }
+    }
     function deviceValue(select) { return select.value === '' ? null : Number(select.value); }
     function addDevices(select, devices) {
       for (const device of devices) {
@@ -464,7 +622,16 @@ async def dashboard() -> str:
     document.querySelector('#stop').onclick = async () => { try { await request('/api/stop', {method: 'POST'}); } catch (error) { message.textContent = error.message; } finally { refresh(); } };
     document.querySelector('#refresh').onclick = () => refresh(true);
     document.querySelector('#relay-log-copy').onclick = () => copyLog(logs, message);
+    document.querySelector('#usb-log-copy').onclick = () => copyLog(usbLogs, usbMessage);
     document.querySelector('#headset-log-copy').onclick = () => copyLog(headsetLogs, headsetMessage);
+    document.querySelector('#usb-start').onclick = async () => {
+      try { await request('/api/usb/start', {method: 'POST'}); }
+      catch (error) { usbMessage.textContent = error.message; } finally { refreshUsb(); }
+    };
+    document.querySelector('#usb-stop').onclick = async () => {
+      try { await request('/api/usb/stop', {method: 'POST'}); }
+      catch (error) { usbMessage.textContent = error.message; } finally { refreshUsb(); }
+    };
     document.querySelector('#headset-start').onclick = async () => {
       try {
         await request('/api/headset/start', {method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -483,8 +650,8 @@ async def dashboard() -> str:
       try { await request('/api/headset/conversation/pause', {method: 'POST'}); }
       catch (error) { headsetMessage.textContent = error.message; } finally { refreshHeadset(); }
     };
-    refresh(); refreshHeadset(); loadAudioDevices();
-    setInterval(() => { refresh(); refreshHeadset(); }, 2000);
+    refresh(); refreshUsb(); refreshHeadset(); loadAudioDevices();
+    setInterval(() => { refresh(); refreshUsb(); refreshHeadset(); }, 2000);
   </script>
 </body>
 </html>"""
@@ -498,7 +665,9 @@ async def status() -> dict[str, Any]:
 @app.post("/api/start")
 async def start() -> dict[str, Any]:
     try:
-        return supervisor.start()
+        relay_status = supervisor.start()
+        usb_bridge_supervisor.start()
+        return relay_status
     except LocalManagerError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
@@ -506,6 +675,7 @@ async def start() -> dict[str, Any]:
 @app.post("/api/stop")
 async def stop() -> dict[str, Any]:
     try:
+        usb_bridge_supervisor.stop()
         return supervisor.stop(reject_unmanaged=True)
     except LocalManagerError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -514,6 +684,41 @@ async def stop() -> dict[str, Any]:
 @app.get("/api/logs")
 async def logs(lines: int = Query(default=250, ge=1, le=1000)) -> dict[str, Any]:
     return supervisor.read_logs(lines)
+
+
+@app.post("/api/browser/open")
+async def open_browser(request: BrowserOpenRequest) -> dict[str, Any]:
+    settings = Settings(local_browser_tool_enabled=True)
+    executor = LocalActionExecutor(settings, browser_launcher=browser_broker.open)
+    try:
+        return await executor.execute("open_browser_url", {"url": request.url})
+    except LocalActionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/usb/status")
+async def usb_status() -> dict[str, Any]:
+    return usb_bridge_supervisor.status()
+
+
+@app.post("/api/usb/start")
+async def start_usb_bridge() -> dict[str, Any]:
+    if not supervisor.status()["reachable"]:
+        raise HTTPException(status_code=409, detail="Start the Relay before the USB bridge.")
+    try:
+        return usb_bridge_supervisor.start()
+    except LocalManagerError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/api/usb/stop")
+async def stop_usb_bridge() -> dict[str, Any]:
+    return usb_bridge_supervisor.stop()
+
+
+@app.get("/api/usb/logs")
+async def usb_logs(lines: int = Query(default=250, ge=1, le=1000)) -> dict[str, Any]:
+    return usb_bridge_supervisor.read_logs(lines)
 
 
 @app.get("/api/audio-devices")

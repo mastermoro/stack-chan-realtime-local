@@ -2,7 +2,13 @@ from pathlib import Path
 
 import pytest
 
-from local_manager import HeadsetSupervisor, LocalManagerError, RelaySupervisor
+from local_manager import (
+    BrowserBroker,
+    HeadsetSupervisor,
+    LocalManagerError,
+    RelaySupervisor,
+    UsbBridgeSupervisor,
+)
 
 
 def test_stopped_supervisor_reports_lan_relay_url(tmp_path: Path) -> None:
@@ -42,3 +48,40 @@ def test_headset_test_requires_relay_virtual_environment(tmp_path: Path) -> None
 
     with pytest.raises(LocalManagerError, match="virtual environment"):
         supervisor.start(input_device=None, output_device=None)
+
+
+def test_usb_bridge_requires_relay_virtual_environment(tmp_path: Path) -> None:
+    supervisor = UsbBridgeSupervisor(tmp_path, log_directory=tmp_path / "logs")
+
+    with pytest.raises(LocalManagerError, match="virtual environment"):
+        supervisor.start()
+
+
+def test_stopped_usb_bridge_has_no_child_status(tmp_path: Path) -> None:
+    supervisor = UsbBridgeSupervisor(tmp_path, log_directory=tmp_path / "logs")
+
+    assert supervisor.status() == {
+        "running": False,
+        "pid": None,
+        "started_at": None,
+        "last_exit_code": None,
+        "bridge": None,
+    }
+
+
+def test_browser_broker_uses_interactive_explorer(monkeypatch: pytest.MonkeyPatch) -> None:
+    launched: list[list[str]] = []
+
+    class FakeProcess:
+        def wait(self, timeout: float) -> int:
+            assert timeout == 5
+            return 1
+
+    def fake_popen(arguments: list[str]) -> FakeProcess:
+        launched.append(arguments)
+        return FakeProcess()
+
+    monkeypatch.setattr("local_manager.subprocess.Popen", fake_popen)
+
+    assert BrowserBroker.open("https://example.com/")
+    assert launched == [["explorer.exe", "https://example.com/"]]

@@ -58,6 +58,7 @@ notepad .env
 ```
 
 ブラウザで`http://127.0.0.1:8787`を開き、Relayを起動します。Manager UIはPC内だけに公開され、Stack-chan用RelayはLAN向けに`0.0.0.0:8080`で待ち受けます。
+Relayと同時にUSBブリッジも起動し、EspressifのUSB COMポートを自動検出します。
 
 `relay/.env`の最低限の設定:
 
@@ -121,6 +122,20 @@ cd stackchan
 選択結果だけを安全に確認するには`-ResolveOnly`を使います。Relayをまだ起動していない状態で書き込む場合だけ`-SkipRelayCheck`を指定できます。
 
 Windows Defender Firewallの確認が表示された場合は、信頼するプライベートネットワークだけを許可してください。ポート8080をインターネットへ転送しないでください。
+
+## USB / Wi-Fiモード
+
+Stack-chanのSettings（Volume調整）ページにある`AUTO`、`WI-FI`、`USB`で接続経路を選択できます。選択は本体へ保存され、再起動後も維持されます。
+
+- `AUTO`: 起動時にUSBを3秒待ち、利用できなければWi-Fiへ接続します。USB使用中はWi-FiとESP-NOWを停止し、USBが切れた時点でWi-Fiを起動します。Wi-Fiで会話中にUSBが見つかった場合は、応答終了後に切り替えます。
+- `WI-FI`: 従来のWi-Fi接続だけを使用し、USBへ自動退避しません。
+- `USB`: USB接続だけを使用し、ケーブルが抜けてもWi-Fiへ切り替えません。USB中はESP-NOWリモコンを使用できません。
+
+経路を手動変更すると進行中の会話とコンテキストは終了し、新しい接続でセッションを開始します。ManagerのUSBブリッジ欄では、COMポート、端末ID、接続状態、破損フレームや連番欠損の統計、端末ログを確認できます。
+
+ファームウェア書き込み時は`deploy-from-relay.ps1`がManager管理下のUSBブリッジを一時停止してCOMポートを解放し、終了後に自動再開します。手動でPlatformIOの書き込みやシリアルモニターを使う場合は、Managerの「ブリッジを停止」を先に押してください。
+
+設計判断、ハードウェア検証条件、受け入れ試験は[`docs/usb-relay-mode-plan.md`](docs/usb-relay-mode-plan.md)に記録しています。
 
 ## ブラウザFunction
 

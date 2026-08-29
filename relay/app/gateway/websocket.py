@@ -4,10 +4,12 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from app.config.settings import get_settings
 from app.gateway.auth import DeviceAuthenticationError, DeviceAuthenticator
+from app.gateway.connections import DeviceConnectionRegistry
 from app.session.orchestrator import RelaySession
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+connections = DeviceConnectionRegistry()
 
 
 @router.websocket("/v1/realtime")
@@ -21,6 +23,7 @@ async def realtime_gateway(websocket: WebSocket) -> None:
         return
 
     await websocket.accept()
+    await connections.claim(device_id, websocket)
     session = RelaySession(websocket, device_id, settings)
     try:
         await session.run()
@@ -35,3 +38,5 @@ async def realtime_gateway(websocket: WebSocket) -> None:
             await websocket.close(code=1011)
         except Exception:
             pass
+    finally:
+        await connections.release(device_id, websocket)

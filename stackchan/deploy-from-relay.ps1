@@ -266,15 +266,39 @@ try {
     }
 
     if (-not $BuildOnly) {
+        $managerUrl = "http://127.0.0.1:8787"
+        $usbBridgeWasRunning = $false
+        try {
+            $usbStatus = Invoke-RestMethod -Uri "$managerUrl/api/usb/status" -TimeoutSec 2
+            $usbBridgeWasRunning = [bool]$usbStatus.running
+            if ($usbBridgeWasRunning) {
+                $null = Invoke-RestMethod -Method Post -Uri "$managerUrl/api/usb/stop" -TimeoutSec 5
+                Write-Host "USB bridge stopped temporarily for firmware upload."
+            }
+        } catch {
+            Write-Verbose "Relay Manager USB bridge status was unavailable: $($_.Exception.Message)"
+        }
+
         $uploadArguments = @("run", "-t", "upload")
         if ($UploadPort) {
             $uploadArguments += @("--upload-port", $UploadPort)
         }
-        & $pio.Source @uploadArguments
-        if ($LASTEXITCODE -ne 0) {
-            throw "PlatformIO upload failed with exit code $LASTEXITCODE."
+        try {
+            & $pio.Source @uploadArguments
+            if ($LASTEXITCODE -ne 0) {
+                throw "PlatformIO upload failed with exit code $LASTEXITCODE."
+            }
+            Write-Host "Stack-chan deployment completed."
+        } finally {
+            if ($usbBridgeWasRunning) {
+                try {
+                    $null = Invoke-RestMethod -Method Post -Uri "$managerUrl/api/usb/start" -TimeoutSec 5
+                    Write-Host "USB bridge restarted after firmware upload."
+                } catch {
+                    Write-Warning "USB bridge could not be restarted automatically: $($_.Exception.Message)"
+                }
+            }
         }
-        Write-Host "Stack-chan deployment completed."
     } else {
         Write-Host "Firmware build completed; upload was skipped."
     }

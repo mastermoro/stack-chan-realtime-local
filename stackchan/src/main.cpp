@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <M5StackChan.h>
+#include <Preferences.h>
 #include <esp_now.h>
 #include <esp_camera.h>
 #include <esp_random.h>
@@ -28,6 +29,7 @@ int16_t capture_buffer[kFrameSamples];
 bool conversation_active = false;
 bool resume_after_response = false;
 bool relay_started = false;
+enum class ConnectionMode : uint8_t { Auto, Wifi, Usb };
 enum class UiPage : uint8_t { Status, Face, Settings };
 enum class IdleMode : uint8_t { Active, LookingAround, Sleeping };
 UiPage ui_page = UiPage::Status;
@@ -67,6 +69,11 @@ wl_status_t last_wifi_status = WL_IDLE_STATUS;
 uint8_t wifi_attempt_count = 0;
 bool wifi_failed = false;
 bool espnow_ready = false;
+ConnectionMode connection_mode = ConnectionMode::Auto;
+RelayTransport selected_transport = RelayTransport::None;
+Preferences preferences;
+uint32_t connection_mode_started_ms = 0;
+bool pending_usb_switch = false;
 volatile uint8_t espnow_receiver_id = 1;
 struct RemoteMotionCommand {
   int16_t yaw = 0;
@@ -78,6 +85,7 @@ RemoteMotionCommand remote_motion;
 portMUX_TYPE remote_motion_lock = portMUX_INITIALIZER_UNLOCKED;
 
 constexpr uint32_t kWifiReconnectIntervalMs = 10000;
+constexpr uint32_t kAutoUsbWaitMs = 3000;
 constexpr uint8_t kWifiMaxAttempts = 3;
 constexpr int kTabHeight = 28;
 constexpr int kCameraWipeWidth = 128;
@@ -119,6 +127,10 @@ void report_target_network_visibility();
 void draw_cached_camera_wipe();
 void note_activity(bool return_home = true);
 void update_idle_behavior();
+void manage_connection();
+void set_connection_mode(ConnectionMode mode);
+void maintain_wifi();
+void start_relay_when_wifi_ready();
 
 // CoreS3's built-in GC0308 uses a dedicated parallel camera bus.  The camera
 // owns the internal I2C pins while it is active, so M5.In_I2C is released just
@@ -711,6 +723,39 @@ void render_face(bool show_overlay) {
   }
 }
 
+const char* connection_mode_label(ConnectionMode mode) {
+  switch (mode) {
+    case ConnectionMode::Auto: return "AUTO";
+    case ConnectionMode::Wifi: return "WI-FI";
+    case ConnectionMode::Usb: return "USB";
+  }
+  return "?";
+}
+
+const char* active_transport_label() {
+  switch (selected_transport) {
+    case RelayTransport::Wifi: return "Wi-Fi";
+    case RelayTransport::Usb: return "USB";
+    case RelayTransport::None: return "waiting";
+  }
+  return "waiting";
+}
+
+void draw_connection_mode_button(ConnectionMode mode, int x, int width) {
+  const uint32_t color = state_color();
+  if (connection_mode == mode) {
+    ui_sprite.fillRoundRect(x, 145, width, 28, 5, color);
+    ui_sprite.setTextColor(TFT_BLACK, color);
+  } else {
+    ui_sprite.drawRoundRect(x, 145, width, 28, 5, TFT_DARKGREY);
+    ui_sprite.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
+  }
+  ui_sprite.setTextSize(1);
+  const char* label = connection_mode_label(mode);
+  ui_sprite.setCursor(x + (width - strlen(label) * 6) / 2, 155);
+  ui_sprite.print(label);
+}
+
 void render_settings() {
   const uint32_t color = state_color();
   ui_sprite.setTextColor(TFT_WHITE, TFT_BLACK);
@@ -731,18 +776,22 @@ void render_settings() {
   ui_sprite.setCursor(275, 94);
   ui_sprite.print("+");
   ui_sprite.setTextSize(1);
-  ui_sprite.setCursor(12, 138);
-  ui_sprite.printf("Wi-Fi: %s", WIFI_SSID);
-  ui_sprite.setCursor(12, 156);
-  ui_sprite.printf("IP: %s", WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString().c_str()
-                                                               : "not connected");
-  ui_sprite.setCursor(12, 174);
-  ui_sprite.printf("Relay: %s:%d%s", RELAY_HOST, RELAY_PORT,
-                    RELAY_USE_TLS ? " (TLS)" : "");
-  ui_sprite.setCursor(12, 192);
-  ui_sprite.printf("ESP-NOW channel: %u", WiFi.status() == WL_CONNECTED ? WiFi.channel() : 0);
-  ui_sprite.setCursor(12, 212);
-  ui_sprite.printf("Remote ID: < %u >", espnow_receiver_id);
+  ui_sprite.setCursor(12, 133);
+  ui_sprite.print("Relay connection");
+  draw_connection_mode_button(ConnectionMode::Auto, 12, 92);
+  draw_connection_mode_button(ConnectionMode::Wifi, 114, 92);
+  draw_connection_mode_button(ConnectionMode::Usb, 216, 92);
+  ui_sprite.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
+  ui_sprite.setCursor(12, 183);
+  ui_sprite.printf("Active: %s%s", active_transport_label(),
+                   pending_usb_switch ? " (USB pending)" : "");
+  ui_sprite.setCursor(12, 201);
+  ui_sprite.printf("Wi-Fi: %s", WiFi.status() == WL_CONNECTED
+                                   ? WiFi.localIP().toString().c_str()
+                                   : "off / disconnected");
+  ui_sprite.setCursor(12, 219);
+  ui_sprite.printf("Remote: < %u >  ESP-NOW: %s", espnow_receiver_id,
+                   espnow_ready ? String(WiFi.channel()).c_str() : "off");
 }
 
 void render_ui(bool should_present) {
@@ -767,6 +816,115 @@ void connect_wifi() {
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
   last_wifi_attempt = millis();
   report_wifi_status(true);
+}
+
+void stop_espnow_remote() {
+  if (espnow_ready) {
+    esp_now_deinit();
+    espnow_ready = false;
+  }
+  portENTER_CRITICAL(&remote_motion_lock);
+  remote_motion.pending = false;
+  portEXIT_CRITICAL(&remote_motion_lock);
+}
+
+void end_active_session() {
+  if (relay.connected()) relay.send_control("conversation.pause");
+  conversation_active = false;
+  resume_after_response = false;
+  audio.set_capture_enabled(false);
+  audio.stop_playback();
+  relay.end();
+  relay_started = false;
+}
+
+void activate_usb_transport() {
+  end_active_session();
+  stop_espnow_remote();
+  WiFi.disconnect(true, false);
+  WiFi.mode(WIFI_OFF);
+  wifi_failed = false;
+  selected_transport = RelayTransport::Usb;
+  pending_usb_switch = false;
+  detail = relay.usb_host_available() ? "Connecting Relay over USB" : "Waiting for USB bridge";
+  handle_state(AgentState::Connecting);
+  relay.begin_usb();
+  Serial.println("Relay transport selected: USB");
+}
+
+void activate_wifi_transport() {
+  end_active_session();
+  stop_espnow_remote();
+  selected_transport = RelayTransport::Wifi;
+  pending_usb_switch = false;
+  detail = "Starting Wi-Fi";
+  handle_state(AgentState::Connecting);
+  connect_wifi();
+  Serial.println("Relay transport selected: Wi-Fi");
+}
+
+void set_connection_mode(ConnectionMode mode) {
+  if (connection_mode == mode) return;
+  connection_mode = mode;
+  preferences.putUChar("conn_mode", static_cast<uint8_t>(mode));
+  connection_mode_started_ms = millis();
+  selected_transport = RelayTransport::None;
+  end_active_session();
+  stop_espnow_remote();
+  WiFi.disconnect(true, false);
+  WiFi.mode(WIFI_OFF);
+  detail = String("Mode: ") + connection_mode_label(mode);
+  handle_state(AgentState::Connecting);
+
+  if (mode == ConnectionMode::Wifi) {
+    activate_wifi_transport();
+  } else if (mode == ConnectionMode::Usb) {
+    activate_usb_transport();
+  }
+}
+
+void manage_connection() {
+  const bool usb_available = relay.usb_host_available();
+
+  if (connection_mode == ConnectionMode::Wifi) {
+    if (selected_transport != RelayTransport::Wifi) activate_wifi_transport();
+    maintain_wifi();
+    start_relay_when_wifi_ready();
+    return;
+  }
+
+  if (connection_mode == ConnectionMode::Usb) {
+    if (selected_transport != RelayTransport::Usb) activate_usb_transport();
+    return;
+  }
+
+  // AUTO: wait briefly for the preferred USB path before powering up Wi-Fi.
+  if (selected_transport == RelayTransport::None) {
+    if (usb_available) {
+      activate_usb_transport();
+    } else if (millis() - connection_mode_started_ms >= kAutoUsbWaitMs) {
+      activate_wifi_transport();
+    }
+    return;
+  }
+
+  if (selected_transport == RelayTransport::Usb) {
+    if (!usb_available) activate_wifi_transport();
+    return;
+  }
+
+  maintain_wifi();
+  start_relay_when_wifi_ready();
+  if (!usb_available) {
+    pending_usb_switch = false;
+    return;
+  }
+  if (conversation_active || state == AgentState::Listening || state == AgentState::Thinking ||
+      state == AgentState::Searching || state == AgentState::Speaking) {
+    pending_usb_switch = true;
+    return;
+  }
+  activate_usb_transport();
 }
 
 void maintain_wifi() {
@@ -819,7 +977,7 @@ void start_relay_when_wifi_ready() {
   Serial.println("Wi-Fi connected; starting Relay");
   render_ui();
   start_espnow_remote();
-  relay.begin();
+  relay.begin_wifi();
 }
 
 void start_listening() {
@@ -838,6 +996,12 @@ void handle_state(AgentState next) {
   }
   audio.set_capture_enabled(conversation_active && next == AgentState::Listening);
   render_ui();
+  if (next == AgentState::Ready && pending_usb_switch) {
+    conversation_active = false;
+    resume_after_response = false;
+    audio.set_capture_enabled(false);
+    return;
+  }
   if (next == AgentState::Ready && resume_after_response && conversation_active) {
     start_listening();
   }
@@ -1005,7 +1169,14 @@ void handle_touch() {
     return;
   }
 
-  if (ui_page == UiPage::Settings && touch.y >= 196 && touch.y <= 236) {
+  if (ui_page == UiPage::Settings && touch.y >= 140 && touch.y <= 180) {
+    const int segment = std::min(2, touch.x / (M5.Display.width() / 3));
+    set_connection_mode(static_cast<ConnectionMode>(segment));
+    render_ui();
+    return;
+  }
+
+  if (ui_page == UiPage::Settings && touch.y >= 205 && touch.y <= 239) {
     if (touch.x < M5.Display.width() / 2 && espnow_receiver_id > 1) {
       --espnow_receiver_id;
     } else if (touch.x >= M5.Display.width() / 2 && espnow_receiver_id < 254) {
@@ -1040,6 +1211,8 @@ void handle_touch() {
 }  // namespace
 
 void setup() {
+  Serial.setRxBufferSize(16 * 1024);
+  Serial.setTxBufferSize(16 * 1024);
   Serial.begin(115200);
   randomSeed(esp_random());
   M5StackChan.begin();
@@ -1049,8 +1222,13 @@ void setup() {
   ui_sprite.setPsram(true);
   ui_sprite.createSprite(M5.Display.width(), M5.Display.height());
   last_activity_ms = millis();
+  preferences.begin("stackchan", false);
+  const uint8_t stored_mode = preferences.getUChar("conn_mode", 0);
+  connection_mode = stored_mode <= static_cast<uint8_t>(ConnectionMode::Usb)
+                        ? static_cast<ConnectionMode>(stored_mode)
+                        : ConnectionMode::Auto;
+  connection_mode_started_ms = millis();
   handle_state(AgentState::Connecting);
-  connect_wifi();
 
   relay.on_state(handle_state);
   relay.on_response_done(handle_response_done);
@@ -1067,9 +1245,8 @@ void setup() {
 
 void loop() {
   M5.update();
-  maintain_wifi();
-  start_relay_when_wifi_ready();
   relay.loop();
+  manage_connection();
   static bool relay_was_connected = false;
   if (relay.connected() && !relay_was_connected) sync_ui_mode();
   relay_was_connected = relay.connected();
