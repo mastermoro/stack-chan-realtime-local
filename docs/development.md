@@ -34,6 +34,9 @@ pio run
 通常の初回実行では、リポジトリルートから `setup.cmd` を起動する。
 ネイティブの Windows セットアップ UI は Python の依存関係をインストールする前でも動作し、
 `relay/.env` と、Git 管理対象外の Stack-chan 認証情報ヘッダーの両方を設定する。
+依存関係の状態は `relay/.venv/.stackchan-install.json` に記録され、`pyproject.toml`、選択 extras、
+または `pip check` の結果が変わらない再実行ではインストールを省略する。
+キャッシュを無視して更新する場合は `setup-windows.ps1 -Force` を指定する。
 
 ```powershell
 cd relay

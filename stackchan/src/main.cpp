@@ -30,7 +30,7 @@ bool conversation_active = false;
 bool resume_after_response = false;
 bool relay_started = false;
 enum class ConnectionMode : uint8_t { Auto, Wifi, Usb };
-enum class UiPage : uint8_t { Status, Face, Settings };
+enum class UiPage : uint8_t { Status, Face, Network, Settings };
 enum class IdleMode : uint8_t { Active, LookingAround, Sleeping };
 UiPage ui_page = UiPage::Status;
 IdleMode idle_mode = IdleMode::Active;
@@ -77,6 +77,12 @@ RelayTransport selected_transport = RelayTransport::None;
 Preferences preferences;
 uint32_t connection_mode_started_ms = 0;
 bool pending_usb_switch = false;
+IPAddress relay_address;
+uint16_t relay_port = RELAY_PORT;
+bool relay_endpoint_editing = false;
+uint8_t relay_address_draft[4] = {};
+uint16_t relay_port_draft = RELAY_PORT;
+uint8_t relay_endpoint_field = 0;
 volatile uint8_t espnow_receiver_id = 1;
 struct RemoteMotionCommand {
   int16_t yaw = 0;
@@ -457,18 +463,18 @@ uint32_t state_color() {
 }
 
 void draw_tabs() {
-  static constexpr const char* kTabs[] = {"STATUS", "FACE", "SETTINGS"};
-  const int tab_width = ui_sprite.width() / 3;
+  static constexpr const char* kTabs[] = {"STATUS", "FACE", "NETWORK", "SETTINGS"};
+  const int tab_width = ui_sprite.width() / 4;
   ui_sprite.fillRect(0, 0, ui_sprite.width(), kTabHeight, TFT_DARKGREY);
   ui_sprite.setTextSize(1);
-  for (int index = 0; index < 3; ++index) {
+  for (int index = 0; index < 4; ++index) {
     const bool selected = index == static_cast<int>(ui_page);
     const int x = index * tab_width;
     ui_sprite.fillRect(x + 2, 3, tab_width - 4, kTabHeight - 6,
                         selected ? state_color() : TFT_BLACK);
     ui_sprite.setTextColor(selected ? TFT_BLACK : TFT_LIGHTGREY,
                             selected ? state_color() : TFT_BLACK);
-    ui_sprite.setCursor(x + 10, 11);
+    ui_sprite.setCursor(x + (tab_width - strlen(kTabs[index]) * 6) / 2, 11);
     ui_sprite.print(kTabs[index]);
   }
 }
@@ -502,7 +508,7 @@ void render_status() {
     ui_sprite.printf("Wi-Fi: %s", wifi_status_label(WiFi.status()));
   }
   ui_sprite.setCursor(12, 150);
-  ui_sprite.printf("Relay: %s:%d", RELAY_HOST, RELAY_PORT);
+  ui_sprite.printf("Relay: %s:%u", relay_address.toString().c_str(), relay_port);
   draw_action_button(color);
 }
 
@@ -752,16 +758,94 @@ const char* active_transport_label() {
 void draw_connection_mode_button(ConnectionMode mode, int x, int width) {
   const uint32_t color = state_color();
   if (connection_mode == mode) {
-    ui_sprite.fillRoundRect(x, 145, width, 28, 5, color);
+    ui_sprite.fillRoundRect(x, 80, width, 28, 5, color);
     ui_sprite.setTextColor(TFT_BLACK, color);
   } else {
-    ui_sprite.drawRoundRect(x, 145, width, 28, 5, TFT_DARKGREY);
+    ui_sprite.drawRoundRect(x, 80, width, 28, 5, TFT_DARKGREY);
     ui_sprite.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
   }
   ui_sprite.setTextSize(1);
   const char* label = connection_mode_label(mode);
-  ui_sprite.setCursor(x + (width - strlen(label) * 6) / 2, 155);
+  ui_sprite.setCursor(x + (width - strlen(label) * 6) / 2, 90);
   ui_sprite.print(label);
+}
+
+void draw_relay_endpoint_field(int x, int y, int width, const String& value, bool selected) {
+  const uint32_t color = state_color();
+  ui_sprite.drawRoundRect(x, y, width, 28, 5, selected ? color : TFT_DARKGREY);
+  ui_sprite.setTextColor(selected ? color : TFT_LIGHTGREY, TFT_BLACK);
+  ui_sprite.setTextSize(1);
+  ui_sprite.setCursor(x + (width - value.length() * 6) / 2, y + 10);
+  ui_sprite.print(value);
+}
+
+void render_relay_endpoint_editor() {
+  ui_sprite.setTextSize(1);
+  ui_sprite.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
+  ui_sprite.setCursor(12, 67);
+  ui_sprite.print("IPv4 address");
+  for (int index = 0; index < 4; ++index) {
+    draw_relay_endpoint_field(12 + index * 76, 80, 64, String(relay_address_draft[index]),
+                              relay_endpoint_field == index);
+  }
+  ui_sprite.setCursor(12, 121);
+  ui_sprite.print("Port");
+  draw_relay_endpoint_field(70, 112, 110, String(relay_port_draft),
+                            relay_endpoint_field == 4);
+
+  const uint32_t color = state_color();
+  ui_sprite.drawRoundRect(12, 148, 92, 32, 6, color);
+  ui_sprite.drawRoundRect(216, 148, 92, 32, 6, color);
+  ui_sprite.setTextSize(2);
+  ui_sprite.setTextColor(color, TFT_BLACK);
+  ui_sprite.setCursor(53, 156);
+  ui_sprite.print("-");
+  ui_sprite.setCursor(257, 156);
+  ui_sprite.print("+");
+
+  ui_sprite.fillRoundRect(12, 194, 140, 34, 6, color);
+  ui_sprite.drawRoundRect(168, 194, 140, 34, 6, TFT_DARKGREY);
+  ui_sprite.setTextSize(1);
+  ui_sprite.setTextColor(TFT_BLACK, color);
+  ui_sprite.setCursor(68, 207);
+  ui_sprite.print("SAVE");
+  ui_sprite.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
+  ui_sprite.setCursor(218, 207);
+  ui_sprite.print("CANCEL");
+}
+
+void render_network() {
+  ui_sprite.setTextColor(TFT_WHITE, TFT_BLACK);
+  ui_sprite.setTextSize(2);
+  ui_sprite.setCursor(12, 40);
+  ui_sprite.print("Network");
+  if (relay_endpoint_editing) {
+    render_relay_endpoint_editor();
+    return;
+  }
+
+  ui_sprite.setTextSize(1);
+  ui_sprite.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
+  ui_sprite.setCursor(12, 67);
+  ui_sprite.print("Connection mode");
+  draw_connection_mode_button(ConnectionMode::Auto, 12, 92);
+  draw_connection_mode_button(ConnectionMode::Wifi, 114, 92);
+  draw_connection_mode_button(ConnectionMode::Usb, 216, 92);
+  ui_sprite.setCursor(12, 122);
+  ui_sprite.printf("Active: %s%s", active_transport_label(),
+                   pending_usb_switch ? " (USB pending)" : "");
+  ui_sprite.setCursor(12, 142);
+  ui_sprite.printf("Wi-Fi: %s", WiFi.status() == WL_CONNECTED
+                                   ? WiFi.localIP().toString().c_str()
+                                   : "off / disconnected");
+  ui_sprite.setCursor(12, 166);
+  ui_sprite.print("Relay endpoint");
+  ui_sprite.drawRoundRect(12, 178, 296, 38, 6, state_color());
+  ui_sprite.setTextColor(state_color(), TFT_BLACK);
+  ui_sprite.setCursor(24, 193);
+  ui_sprite.printf("%s:%u", relay_address.toString().c_str(), relay_port);
+  ui_sprite.setCursor(244, 193);
+  ui_sprite.print("EDIT");
 }
 
 void render_settings() {
@@ -784,20 +868,11 @@ void render_settings() {
   ui_sprite.setCursor(275, 94);
   ui_sprite.print("+");
   ui_sprite.setTextSize(1);
-  ui_sprite.setCursor(12, 133);
-  ui_sprite.print("Relay connection");
-  draw_connection_mode_button(ConnectionMode::Auto, 12, 92);
-  draw_connection_mode_button(ConnectionMode::Wifi, 114, 92);
-  draw_connection_mode_button(ConnectionMode::Usb, 216, 92);
   ui_sprite.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
-  ui_sprite.setCursor(12, 183);
-  ui_sprite.printf("Active: %s%s", active_transport_label(),
-                   pending_usb_switch ? " (USB pending)" : "");
-  ui_sprite.setCursor(12, 201);
-  ui_sprite.printf("Wi-Fi: %s", WiFi.status() == WL_CONNECTED
-                                   ? WiFi.localIP().toString().c_str()
-                                   : "off / disconnected");
-  ui_sprite.setCursor(12, 219);
+  ui_sprite.setCursor(12, 154);
+  ui_sprite.print("ESP-NOW remote receiver");
+  ui_sprite.drawRoundRect(12, 170, 296, 40, 6, color);
+  ui_sprite.setCursor(36, 185);
   ui_sprite.printf("Remote: < %u >  ESP-NOW: %s", espnow_receiver_id,
                    espnow_ready ? String(WiFi.channel()).c_str() : "off");
 }
@@ -808,6 +883,7 @@ void render_ui(bool should_present) {
   if (ui_page == UiPage::Status) render_status();
   if (ui_page == UiPage::Face) render_face(face_overlay_visible);
   if (ui_page == UiPage::Face && camera_wipe_visible) draw_cached_camera_wipe();
+  if (ui_page == UiPage::Network) render_network();
   if (ui_page == UiPage::Settings) render_settings();
   if (should_present) present_ui();
 }
@@ -985,7 +1061,7 @@ void start_relay_when_wifi_ready() {
   Serial.println("Wi-Fi connected; starting Relay");
   render_ui();
   start_espnow_remote();
-  relay.begin_wifi();
+  relay.begin_wifi(relay_address.toString().c_str(), relay_port);
 }
 
 void start_listening() {
@@ -1196,8 +1272,9 @@ void handle_touch() {
   if (touch.wasFlicked() && abs(touch.distanceX()) > 50 &&
       abs(touch.distanceX()) > abs(touch.distanceY())) {
     int page = static_cast<int>(ui_page) + (touch.distanceX() < 0 ? 1 : -1);
-    if (page < 0) page = 2;
-    if (page > 2) page = 0;
+    if (page < 0) page = 3;
+    if (page > 3) page = 0;
+    relay_endpoint_editing = false;
     ui_page = static_cast<UiPage>(page);
     face_overlay_visible = false;
     camera_wipe_visible = false;
@@ -1209,10 +1286,42 @@ void handle_touch() {
   if (!touch.wasClicked()) return;
 
   if ((ui_page != UiPage::Face || face_overlay_visible) && touch.y < kTabHeight) {
-    ui_page = static_cast<UiPage>(std::min(2, touch.x / (ui_sprite.width() / 3)));
+    const UiPage selected_page =
+        static_cast<UiPage>(std::min(3, touch.x / (ui_sprite.width() / 4)));
+    if (selected_page != UiPage::Network) relay_endpoint_editing = false;
+    ui_page = selected_page;
     face_overlay_visible = false;
     camera_wipe_visible = false;
     sync_ui_mode();
+    render_ui();
+    return;
+  }
+
+  if (ui_page == UiPage::Network && relay_endpoint_editing) {
+    if (touch.y >= 76 && touch.y <= 112) {
+      relay_endpoint_field = std::min(3, touch.x / 76);
+    } else if (touch.y >= 112 && touch.y <= 144) {
+      relay_endpoint_field = 4;
+    } else if (touch.y >= 144 && touch.y <= 184 && (touch.x < 112 || touch.x > 208)) {
+      const int delta = touch.x < 112 ? -1 : 1;
+      if (relay_endpoint_field < 4) {
+        relay_address_draft[relay_endpoint_field] = constrain(
+            static_cast<int>(relay_address_draft[relay_endpoint_field]) + delta, 0, 255);
+      } else {
+        relay_port_draft = constrain(static_cast<int>(relay_port_draft) + delta, 1, 65535);
+      }
+    } else if (touch.y >= 188 && touch.x < 160) {
+      relay_address = IPAddress(relay_address_draft[0], relay_address_draft[1],
+                                relay_address_draft[2], relay_address_draft[3]);
+      relay_port = relay_port_draft;
+      preferences.putString("relay_host", relay_address.toString());
+      preferences.putUShort("relay_port", relay_port);
+      relay_endpoint_editing = false;
+      Serial.printf("Relay endpoint saved: %s:%u\n", relay_address.toString().c_str(), relay_port);
+      if (selected_transport == RelayTransport::Wifi) activate_wifi_transport();
+    } else if (touch.y >= 188 && touch.x >= 160) {
+      relay_endpoint_editing = false;
+    }
     render_ui();
     return;
   }
@@ -1256,14 +1365,23 @@ void handle_touch() {
     return;
   }
 
-  if (ui_page == UiPage::Settings && touch.y >= 140 && touch.y <= 180) {
+  if (ui_page == UiPage::Network && touch.y >= 76 && touch.y <= 112) {
     const int segment = std::min(2, touch.x / (M5.Display.width() / 3));
     set_connection_mode(static_cast<ConnectionMode>(segment));
     render_ui();
     return;
   }
 
-  if (ui_page == UiPage::Settings && touch.y >= 205 && touch.y <= 239) {
+  if (ui_page == UiPage::Network && touch.y >= 174 && touch.y <= 220) {
+    for (int index = 0; index < 4; ++index) relay_address_draft[index] = relay_address[index];
+    relay_port_draft = relay_port;
+    relay_endpoint_field = 0;
+    relay_endpoint_editing = true;
+    render_ui();
+    return;
+  }
+
+  if (ui_page == UiPage::Settings && touch.y >= 166 && touch.y <= 214) {
     if (touch.x < M5.Display.width() / 2 && espnow_receiver_id > 1) {
       --espnow_receiver_id;
     } else if (touch.x >= M5.Display.width() / 2 && espnow_receiver_id < 254) {
@@ -1310,6 +1428,12 @@ void setup() {
   ui_sprite.createSprite(M5.Display.width(), M5.Display.height());
   last_activity_ms = millis();
   preferences.begin("stackchan", false);
+  const String stored_relay_address = preferences.getString("relay_host", RELAY_HOST);
+  if (!relay_address.fromString(stored_relay_address) && !relay_address.fromString(RELAY_HOST)) {
+    relay_address = IPAddress(127, 0, 0, 1);
+  }
+  relay_port = preferences.getUShort("relay_port", RELAY_PORT);
+  if (relay_port == 0) relay_port = RELAY_PORT;
   const uint8_t stored_mode = preferences.getUChar("conn_mode", 0);
   connection_mode = stored_mode <= static_cast<uint8_t>(ConnectionMode::Usb)
                         ? static_cast<ConnectionMode>(stored_mode)

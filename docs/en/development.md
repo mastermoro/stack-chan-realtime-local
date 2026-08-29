@@ -34,6 +34,9 @@ The local Relay environment uses `relay/.venv` and `relay/.env`.
 For the normal first-run flow, launch `setup.cmd` from the repository root.
 The native Windows setup UI works before Python dependencies are installed and
 configures both `relay/.env` and the ignored Stack-chan credentials header.
+Dependency state is recorded in `relay/.venv/.stackchan-install.json`. Installation
+is skipped on subsequent runs when `pyproject.toml`, the selected extras, and
+`pip check` are unchanged. Pass `setup-windows.ps1 -Force` to refresh it.
 
 ```powershell
 cd relay

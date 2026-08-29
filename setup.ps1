@@ -289,7 +289,7 @@ function Set-Status {
     }
 }
 
-function Refresh-Status {
+function Update-Status {
     $pythonPath = Get-PythonPath
     $pythonVersion = if ($pythonPath) { & $pythonPath --version 2>&1 } else { "未検出" }
     Set-Status $statusLabels.Python ([bool]$pythonPath) $pythonVersion
@@ -311,7 +311,7 @@ function Refresh-Status {
     Set-Status $statusLabels.AzureCLI ([bool]$azVersion) $(if ($azVersion) { "インストール済み" } else { "未インストール（任意）" })
 }
 
-function Load-Configuration {
+function Import-Configuration {
     $envValues = Read-DotEnv
     $endpointBox.Text = [string]$envValues["AZURE_OPENAI_ENDPOINT"]
     $realtimeBox.Text = [string]$envValues["AZURE_OPENAI_REALTIME_DEPLOYMENT"]
@@ -461,7 +461,7 @@ function Install-Prerequisites {
             throw "依存パッケージのインストールに失敗しました（終了コード $($process.ExitCode)）。"
         }
         $installLog.AppendText("インストールが完了しました。`r`n")
-        Refresh-Status
+        Update-Status
     } finally {
         $form.UseWaitCursor = $false
         $installButton.Enabled = $true
@@ -472,6 +472,15 @@ function Start-Manager {
     if (-not (Test-Path -LiteralPath $venvPython)) {
         throw "先に「必要項目をインストール」を実行してください。"
     }
+    $managerUrl = "http://127.0.0.1:8787/"
+    try {
+        $response = Invoke-WebRequest -UseBasicParsing -Uri $managerUrl -TimeoutSec 1
+        if ($response.StatusCode -eq 200) {
+            Start-Process $managerUrl
+            return
+        }
+    } catch {}
+
     $runManager = Join-Path $relayRoot "run-manager.ps1"
     Start-Process -FilePath "powershell.exe" -ArgumentList @(
         "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
@@ -482,9 +491,9 @@ function Start-Manager {
         [System.Windows.Forms.Application]::DoEvents()
         Start-Sleep -Milliseconds 200
         try {
-            $response = Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:8787/" -TimeoutSec 1
+            $response = Invoke-WebRequest -UseBasicParsing -Uri $managerUrl -TimeoutSec 1
             if ($response.StatusCode -eq 200) {
-                Start-Process "http://127.0.0.1:8787/"
+                Start-Process $managerUrl
                 return
             }
         } catch {}
@@ -493,7 +502,7 @@ function Start-Manager {
 }
 
 $refreshButton.Add_Click({
-    try { Refresh-Status } catch { [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, "確認エラー") }
+    try { Update-Status } catch { [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, "確認エラー") }
 })
 $installButton.Add_Click({
     try { Install-Prerequisites } catch { [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, "インストールエラー") }
@@ -536,8 +545,8 @@ $deployButton.Add_Click({
     }
 })
 
-Load-Configuration
-Refresh-Status
+Import-Configuration
+Update-Status
 if (-not $ValidateOnly) {
     [void]$form.ShowDialog()
 }

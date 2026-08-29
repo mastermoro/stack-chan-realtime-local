@@ -20,7 +20,7 @@ class RelayClient {
   using SessionReconnectedHandler = std::function<void()>;
   using EmotionHandler = std::function<void(const char*)>;
 
-  void begin_wifi();
+  void begin_wifi(const char* host, uint16_t port);
   void begin_usb();
   void end();
   void loop();

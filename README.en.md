@@ -4,6 +4,8 @@
 
 This is a voice agent that connects Stack-chan to a Windows PC on the same local network and uses the Microsoft Foundry Realtime API through the Relay running on that PC.
 
+For a first-time setup, follow [Getting Started with Stack-chan](docs/en/how-to-start.md) from Azure resource preparation through USB connection, configuration, and firmware flashing.
+
 Based on the original [`mastermoro/stack-chan-realtime`](https://github.com/mastermoro/stack-chan-realtime), this version moves the Relay's primary runtime location from Azure Container Apps to a Windows PC. It retains Foundry Realtime, Responses API web search, and the Stack-chan firmware.
 
 ## Architecture
@@ -49,6 +51,7 @@ The setup GUI lets you perform the following tasks in one place:
 - Flash the firmware to a USB-connected Stack-chan
 
 If Python is not installed, the GUI uses Windows `winget` to install Python 3.12 for the current user. If you use Azure CLI authentication instead of an API key, the GUI displays Azure CLI itself as an optional item with its current status.
+On subsequent runs, package installation is skipped when `pyproject.toml` and the selected extras are unchanged and the installed dependencies remain healthy. Run `relay\setup-windows.ps1 -WithHeadset -Force` to force an update. If the Manager is already healthy, "保存してManagerを起動" opens the existing UI instead of starting a duplicate process.
 
 For command-line setup, you can continue to run the following commands:
 
@@ -61,6 +64,7 @@ notepad .env
 
 Open `http://127.0.0.1:8787` in a browser and start the Relay. The Manager UI is exposed only within the PC, while the Stack-chan Relay listens on `0.0.0.0:8080` for LAN connections.
 The USB bridge also starts with the Relay and automatically detects Espressif USB COM ports.
+To exit, click "Managerを終了" at the bottom of the Manager UI. It stops the managed Relay, USB bridge, and headset test before terminating the Manager itself.
 
 Minimum configuration for `relay/.env`:
 
@@ -127,7 +131,8 @@ If a Windows Defender Firewall prompt appears, allow access only on trusted priv
 
 ## USB / Wi-Fi Modes
 
-Select the connection route with `AUTO`, `WI-FI`, or `USB` on Stack-chan's Settings (volume adjustment) page. The selection is saved on the device and persists after restarting.
+Select the connection route with `AUTO`, `WI-FI`, or `USB` on Stack-chan's `NETWORK` tab. The selection is saved on the device and persists after restarting.
+Tap `Relay endpoint` on the same tab to edit the IPv4 address and port used for Wi-Fi. Tap a field, adjust it with `-` / `+`, then tap `SAVE` to persist the endpoint and reconnect over Wi-Fi.
 
 - `AUTO`: Waits three seconds for USB at startup, then connects over Wi-Fi if USB is unavailable. While USB is in use, Wi-Fi and ESP-NOW are stopped; Wi-Fi starts when USB disconnects. If USB is detected during a conversation over Wi-Fi, the route switches after the response finishes.
 - `WI-FI`: Uses only the conventional Wi-Fi connection and does not automatically fall back to USB.
