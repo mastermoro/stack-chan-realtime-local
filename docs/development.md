@@ -1,13 +1,15 @@
-# Development workflow
+[English](en/development.md)
 
-## Branching
+# 開発ワークフロー
 
-- `main`: protected integration branch.
-- Feature branches: `agent/<description>` or `feature/<description>`.
-- Changes are merged by pull request.
-- Keep firmware, relay, and infrastructure changes independently reviewable where practical.
+## ブランチ運用
 
-## Checks
+- `main`: 保護された統合ブランチ。
+- 機能ブランチ: `agent/<description>` または `feature/<description>`。
+- 変更はプルリクエストでマージする。
+- 可能な限り、ファームウェア、Relay、インフラストラクチャの変更を個別にレビューできる状態に保つ。
+
+## チェック
 
 Relay:
 
@@ -18,20 +20,20 @@ ruff check app tests
 pytest
 ```
 
-Firmware:
+ファームウェア:
 
 ```bash
 cd stackchan
 pio run
 ```
 
-## Run the Windows LAN Relay
+## Windows LAN Relay の実行
 
-The local Relay environment uses `relay/.venv` and `relay/.env`.
+ローカル Relay 環境では `relay/.venv` と `relay/.env` を使用する。
 
-For the normal first-run flow, launch `setup.cmd` from the repository root.
-The native Windows setup UI works before Python dependencies are installed and
-configures both `relay/.env` and the ignored Stack-chan credentials header.
+通常の初回実行では、リポジトリルートから `setup.cmd` を起動する。
+ネイティブの Windows セットアップ UI は Python の依存関係をインストールする前でも動作し、
+`relay/.env` と、Git 管理対象外の Stack-chan 認証情報ヘッダーの両方を設定する。
 
 ```powershell
 cd relay
@@ -39,36 +41,36 @@ cd relay
 .\run-local.ps1 -Reload
 ```
 
-It listens on `0.0.0.0:8080` by default so Stack-chan can reach it from the
-trusted LAN. Verify the process locally with:
+デフォルトでは `0.0.0.0:8080` で待ち受けるため、信頼できる LAN から Stack-chan が接続できる。
+次のコマンドでプロセスをローカルから確認する:
 
 ```powershell
 Invoke-RestMethod http://127.0.0.1:8080/healthz
 Invoke-RestMethod http://127.0.0.1:8080/readyz
 ```
 
-`healthz` confirms that the HTTP process is running. `readyz` returns `ready` only
-after `AZURE_OPENAI_ENDPOINT` and both deployment names in `relay/.env` have real
-values. A device session additionally needs either `AZURE_OPENAI_API_KEY` or a
-locally available `DefaultAzureCredential`, such as a signed-in Azure CLI session.
+`healthz` は HTTP プロセスが動作中であることを確認する。`readyz` が `ready` を返すのは、
+`relay/.env` の `AZURE_OPENAI_ENDPOINT` と 2 つのデプロイ名に実際の値が設定されている場合のみである。
+デバイスセッションにはさらに、`AZURE_OPENAI_API_KEY`、またはサインイン済みの Azure CLI セッションなど、
+ローカルで利用可能な `DefaultAzureCredential` のいずれかが必要となる。
 
-To restrict a direct development run to this PC, specify:
+開発用の直接実行をこの PC のみに制限するには、次を指定する:
 
 ```powershell
 .\run-local.ps1 -ListenAddress 127.0.0.1 -Reload
 ```
 
-For a LAN Relay, deploy the firmware from the Relay PC:
+LAN Relay の場合は、Relay PC からファームウェアをデプロイする:
 
 ```powershell
 cd stackchan
 .\deploy-from-relay.ps1
 ```
 
-The script selects the IPv4 address on the preferred physical default route,
-generates ignored `include/relay_endpoint.hpp`, verifies `/healthz`, builds, and
-uploads the firmware. It never rewrites `include/secrets.hpp`. If a VPN or
-multiple adapters make the route ambiguous, select the path explicitly:
+このスクリプトは、優先される物理デフォルトルートの IPv4 アドレスを選択し、Git 管理対象外の
+`include/relay_endpoint.hpp` を生成して `/healthz` を確認した後、ファームウェアをビルドして
+アップロードする。`include/secrets.hpp` を書き換えることはない。VPN や複数のアダプターによって
+ルートが曖昧になる場合は、経路を明示的に選択する:
 
 ```powershell
 .\deploy-from-relay.ps1 -StackChanAddress 192.168.1.50
@@ -76,110 +78,124 @@ multiple adapters make the route ambiguous, select the path explicitly:
 .\deploy-from-relay.ps1 -RelayAddress 192.168.1.10
 ```
 
-`-StackChanAddress` asks Windows which local source address it would use to
-reach that device; no application payload is sent. `-ResolveOnly` prints the
-selection without changing files, and `-BuildOnly` generates and builds without
-uploading. The default is `ws://`; use `-UseTls` only with a TLS endpoint whose
-certificate the device trusts. Do not expose the plain-WebSocket listener
-beyond a trusted LAN.
+`-StackChanAddress` は、そのデバイスへの到達に使用するローカル送信元アドレスを Windows に問い合わせる。
+アプリケーションのペイロードは送信されない。`-ResolveOnly` はファイルを変更せずに選択結果を表示し、
+`-BuildOnly` はアップロードせずに生成とビルドを行う。デフォルトは `ws://` である。
+`-UseTls` は、デバイスが証明書を信頼する TLS エンドポイントでのみ使用すること。
+平文 WebSocket のリスナーを信頼できる LAN の外部に公開してはならない。
 
-## Local Relay manager UI
+## ローカル Relay Manager UI
 
-Start the manager, then open `http://127.0.0.1:8787` in a browser:
+Manager を起動し、ブラウザーで `http://127.0.0.1:8787` を開く:
 
 ```powershell
 cd relay
 .\run-manager.ps1
 ```
 
-To replace an already running manager after a code update, use:
+コード更新後に実行中の Manager を置き換えるには、次を使用する:
 
 ```powershell
 .\run-manager.ps1 -Restart
 ```
 
-`-Restart` first asks the existing Manager to stop its managed Relay, then only
-stops a process on the selected port when it can verify that it belongs to this
-Relay Manager; it will not terminate another application.
+`-Restart` は、まず既存の Manager に管理対象 Relay の停止を要求する。その後、選択したポート上の
+プロセスがこの Relay Manager に属すると確認できた場合に限って、そのプロセスを停止する。
+別のアプリケーションを終了することはない。
 
-The UI starts and stops a Relay child process, displays its PID and exit code, and
-tails its local stdout/stderr log. The Manager UI itself is bound to `127.0.0.1`,
-while the Relay child is bound to `0.0.0.0:8080` so Stack-chan can connect from
-the LAN. Its status display checks the local `http://127.0.0.1:8080/healthz`
-endpoint and distinguishes a Relay it manages from one started outside the UI. A managed Relay is stopped when
-the Manager exits or restarts; an external Relay is shown as such and is never
-terminated by the Manager.
+UI は Relay 子プロセスを起動および停止し、その PID と終了コードを表示するとともに、ローカルの
+stdout/stderr ログを追尾する。Manager UI 自体は `127.0.0.1` にバインドされる一方、Relay 子プロセスは、
+Stack-chan が LAN から接続できるよう `0.0.0.0:8080` にバインドされる。ステータス表示はローカルの
+`http://127.0.0.1:8080/healthz` エンドポイントを確認し、UI が管理する Relay と UI 外部で起動された
+Relay を区別する。管理対象 Relay は Manager の終了時または再起動時に停止される。外部 Relay は
+その旨が表示され、Manager によって終了されることはない。
 
-The same UI provides a headset test. It captures the selected (or default) local
-microphone as PCM16 / 24 kHz / mono, sends it to the local Relay as a device, and
-plays returned audio on the selected output device. Install its optional local
-dependency when setting up a new environment:
+同じ UI でヘッドセットテストも利用できる。選択したローカルマイク（またはデフォルトのマイク）から
+PCM16 / 24 kHz / mono で音声をキャプチャし、デバイスとしてローカル Relay に送信して、返された音声を
+選択した出力デバイスで再生する。新しい環境をセットアップするときは、オプションのローカル依存関係を
+インストールする:
 
 ```powershell
 cd relay
 .\.venv\Scripts\python.exe -m pip install -e '.[dev,headset]'
 ```
 
-The test requires a configured Foundry endpoint, deployment names, and device
-token in `relay/.env`; it does not require Stack-chan hardware. First use
-`テストを起動` to establish and retain one Relay/Realtime session. `会話を開始` then
-starts a continuous half-duplex conversation: server VAD detects each utterance,
-microphone input stops while Foundry is thinking or speaking, and it automatically
-returns to listening after each completed response. `会話を一時停止` preserves the
-same session and its context; use `テストを停止` only when the session can be ended.
+このテストには、`relay/.env` に設定済みの Foundry エンドポイント、デプロイ名、デバイストークンが必要だが、
+Stack-chan ハードウェアは必要ない。まず `テストを起動` で 1 つの Relay/Realtime セッションを確立し、維持する。
+続いて `会話を開始` を押すと、連続した半二重会話が始まる。server VAD が各発話を検出し、Foundry が思考中または
+発話中の間はマイク入力が停止し、各応答の完了後に自動的にリスニングへ戻る。`会話を一時停止` では同じセッションと
+そのコンテキストが維持される。セッションを終了してよい場合にのみ `テストを停止` を使用すること。
 
-## Stack-chan controls and UI
+## Stack-chan の操作と UI
 
-The CoreS3 firmware is half duplex. The Face screen is the normal conversation
-screen and keeps the lip sync visible; tabs and diagnostics are hidden there to
-avoid display flicker. Swipe horizontally to move among Status, Face, and
-Settings. Settings provides device-side volume adjustment and Status shows the
-current network/Relay state without displaying credentials.
+CoreS3 ファームウェアは半二重で動作する。Face 画面は通常の会話画面であり、リップシンクを表示し続ける。
+表示のちらつきを避けるため、この画面ではタブと診断情報が非表示になる。横方向にスワイプすると Status、Face、
+Settings の間を移動できる。Settings ではデバイス側の音量を調整でき、Status では認証情報を表示せずに現在の
+ネットワークと Relay の状態を確認できる。
 
-Tap the Face screen to control a continuous conversation, so another tap is not
-required after every response:
+Face 画面をタップして連続会話を制御する。応答のたびに再度タップする必要はない:
 
-- `READY`: tap the display to start a conversation and microphone streaming.
-- `LISTENING`: tap to end the conversation and stop microphone streaming.
-- `THINKING`, `SEARCHING`, or `SPEAKING`: tap to cancel the response and end the
-  conversation.
+- `READY`: ディスプレイをタップして会話とマイクストリーミングを開始する。
+- `LISTENING`: タップして会話を終了し、マイクストリーミングを停止する。
+- `THINKING`、`SEARCHING`、`SPEAKING`: タップして応答をキャンセルし、会話を終了する。
 
-The upper-left 64×64px area of the Face screen is reserved for the camera
-wipe. Tap it to show the CoreS3 camera picture-in-picture and start face
-tracking; tap it again to hide the wipe, stop tracking, and return the head to
-its home position. All other areas keep the conversation controls above.
+Face 画面の左上 64×64px の領域はカメラワイプ用に予約されている。タップすると CoreS3 カメラの
+ピクチャーインピクチャーを表示して顔追跡を開始する。もう一度タップするとワイプを非表示にし、追跡を停止して、
+頭部をホーム位置へ戻す。それ以外の領域では、前述の会話操作が有効である。
 
-Server VAD determines the end of each user utterance. The microphone is disabled
-during response generation and audio playback, then automatically resumes when
-the Relay sends `response.done` followed by `ready`.
+### 猫顔と待機動作
 
-## Windows-local Function Calling
+猫顔は Face 画面の標準アバターである。Relay の `ui.mode=face` により、会話コンテキストを
+維持したまま猫らしい話し方へ切り替える。端末側では会話状態と `emotion` に応じて目、口、
+頬、検索中の動きを描画する。
 
-The local Relay can register `open_browser_url` with Foundry. It is disabled by
-default. Enable it and optionally restrict hosts in `relay/.env`:
+自動待機は、Face 画面で状態が `READY` または `LISTENING`、かつカメラワイプが非表示の
+場合だけ動作する。
+
+1. 最後の操作または検出済み発話から30秒後、`LookingAround`へ移り、猫の待機顔を表示する。
+2. `LookingAround`では2〜15秒のランダムな間隔で視線と首を動かす。
+3. `LookingAround`開始から5分後、首をホーム位置へ戻して`Sleeping`へ移り、閉じた目、呼吸、
+	`Z`表示を約700 msごとに更新する。
+4. タッチ操作、または`LISTENING`中に音声活動を3フレーム連続で検出すると`Active`へ戻る。
+	カメラワイプが非表示なら、首もホーム位置へ戻す。
+
+自動`Sleeping`は表示上の待機状態であり、会話セッションを一時停止しない。上面ダブルタップの
+明示的スリープは別操作で、キャプチャと再生を止めて`conversation.pause`を送り、首を低い
+スリープ姿勢へ動かす。
+
+CoreS3 のトップタッチセンサーでは、どの UI ページからでも操作できる。1 回タップすると Face を開いて
+オーバーレイを非表示にし、Relay 接続中であればリスニングを開始する。2 秒以内にもう一度トップをタップすると、
+会話を一時停止し、キャプチャと再生を停止して、頭部をスリープ時のピッチへ動かす。Settings では、音量のマイナスと
+プラスの操作は 500 ms 長押しするとリピートする。短くタップした場合は従来どおり音量が 1 段階変わる。
+
+Server VAD が各ユーザー発話の終了を判定する。応答の生成中と音声の再生中はマイクが無効になり、
+Relay が `response.done` に続いて `ready` を送信すると自動的に再開する。
+
+## Windows ローカル Function Calling
+
+ローカル Relay は Foundry に `open_browser_url` を登録できる。デフォルトでは無効である。
+`relay/.env` で有効化し、必要に応じてホストを制限する:
 
 ```dotenv
 LOCAL_BROWSER_TOOL_ENABLED=true
 LOCAL_BROWSER_ALLOWED_DOMAINS=microsoft.com,github.com,localhost
 ```
 
-The tool accepts only HTTP(S) URLs and does not expose PowerShell or arbitrary
-commands. See `docs/local-tools.md` before adding another Windows action.
+このツールは HTTP(S) URL のみを受け付け、PowerShell や任意のコマンドを公開しない。
+別の Windows アクションを追加する前に `docs/local-tools.md` を参照すること。
 
-The face changes with the Relay's neutral, happy, sad, angry, surprised, and
-sleepy emotion events. During web search it shows a gentle searching animation.
-Status also shows Relay connection notices, concise error details, and the first
-title returned by web search. Wi-Fi and WebSocket reconnect automatically after
-a connection loss.
+顔の表情は Relay の neutral、happy、sad、angry、surprised、sleepy の各感情イベントに応じて変化する。
+Web 検索中は穏やかな検索アニメーションを表示する。Status には Relay 接続通知、簡潔なエラー詳細、
+Web 検索で返された最初のタイトルも表示される。接続が失われた場合、Wi-Fi と WebSocket は自動的に再接続する。
 
-## Secrets
+## シークレット
 
-Never commit:
+次の項目は絶対にコミットしないこと:
 
 - `relay/.env`
 - `stackchan/include/secrets.hpp`
 - `stackchan/include/relay_endpoint.hpp`
-- Azure API keys
-- Wi-Fi credentials
-- device tokens
-- captured PCM/WAV files
+- Azure API キー
+- Wi-Fi 認証情報
+- デバイストークン
+- キャプチャした PCM/WAV ファイル

@@ -1,42 +1,36 @@
-# Optional Azure Container Apps deployment
+**日本語** | [English](en/deployment.md)
 
-This document is inherited from the upstream repository. The standard
-`stack-chan-realtime-local` deployment runs the Relay on a Windows PC in the
-same LAN as Stack-chan. The instructions below remain available only as an
-optional deployment alternative.
+# Azure Container Apps への任意デプロイ
 
-## Required existing AI resources
+このドキュメントは上流リポジトリから継承したものである。標準の `stack-chan-realtime-local` デプロイでは、Stack-chan と同じ LAN 内の Windows PC で Relay を実行する。以下の手順は、任意の代替デプロイ方法としてのみ残している。
 
-Initial infrastructure expects an existing Microsoft Foundry / Azure OpenAI resource containing:
+## 必要な既存 AI リソース
 
-- a Realtime deployment, default deployment name `gpt-realtime-2.1`
-- a Responses-capable model deployment used for `web_search`, currently
-  `gpt-5.6-terra`
+初期インフラストラクチャでは、次のデプロイを含む既存の Microsoft Foundry / Azure OpenAI リソースを前提とする。
 
-The relay uses the resource endpoint `https://<resource>.openai.azure.com`.
+- Realtime デプロイ。既定のデプロイ名は `gpt-realtime-2.1`
+- `web_search` に使用する Responses 対応モデルのデプロイ。現在は `gpt-5.6-terra`
+
+Relay はリソースエンドポイント `https://<resource>.openai.azure.com` を使用する。
 
 ## Container Apps
 
-`infra/main.bicep` provisions:
+`infra/main.bicep` は次のリソースをプロビジョニングする。
 
-- Log Analytics workspace
-- Azure Container Apps environment
-- external HTTPS Container App ingress on port 8080
-- system-assigned managed identity
-- minimum one replica
+- Log Analytics ワークスペース
+- Azure Container Apps 環境
+- ポート 8080 の外部 HTTPS Container App イングレス
+- システム割り当てマネージド ID
+- 最小 1 レプリカ
 
-The container image is supplied as a parameter so image build/publish can remain in GitHub Actions or an existing ACR process.
+コンテナーイメージはパラメーターとして指定するため、イメージのビルドと発行は GitHub Actions または既存の ACR プロセスに残すことができる。
 
 ## RBAC
 
-Assign the relay's system-assigned identity the appropriate Foundry inference role at the AI resource scope. The current Foundry User role definition ID is documented in `infra/rbac.bicep` as an optional role assignment module.
+Relay のシステム割り当て ID に対して、AI リソースのスコープで適切な Foundry 推論ロールを割り当てる。現在の Foundry User ロール定義 ID は、任意のロール割り当てモジュールとして `infra/rbac.bicep` に記載されている。
 
-## Device tokens
+## デバイストークン
 
-For v0.1, `DEVICE_TOKENS_JSON` is an environment secret. Before multiple production devices, move device credential lifecycle to a dedicated secret/identity mechanism.
+v0.1 では、`DEVICE_TOKENS_JSON` を環境シークレットとする。複数の本番デバイスを導入する前に、デバイス認証情報のライフサイクルを専用のシークレットまたは ID の仕組みに移行する。
 
-Do not place real values in `infra/main.bicepparam`; it is a committed template.
-Pass the device-token JSON through a secure deployment parameter or your CI
-secret store. Container Apps exposes only HTTPS/WSS ingress, but `/healthz` and
-`/readyz` are intentionally unauthenticated for platform probes; the realtime
-WebSocket endpoint itself requires a device token.
+実際の値を `infra/main.bicepparam` に記載してはならない。このファイルはコミット済みのテンプレートである。デバイストークンの JSON は、安全なデプロイパラメーターまたは CI のシークレットストアを介して渡す。Container Apps が公開するのは HTTPS/WSS イングレスのみだが、`/healthz` と `/readyz` はプラットフォームのプローブ用に意図的に未認証としている。Realtime WebSocket エンドポイント自体にはデバイストークンが必要である。

@@ -1,13 +1,18 @@
 # USB Relayモード実装計画
 
+[日本語](usb-relay-mode-plan.md) | [English](en/usb-relay-mode-plan.md)
+
 更新日: 2026-08-29
 
-再検証状態: 条件付き実現可能（USB性能ゲート通過後に本実装へ進む）
+状態: ソフトウェア実装済み（CoreS3実機の長時間・障害復旧ゲートは継続確認）
+
+この文書はUSB Relayモードの設計判断、実装時の検討事項、受け入れ条件を残す履歴文書である。
+現行の利用手順は`README.md`、通信仕様は`docs/protocol.md`を正とする。
 
 ## 目的
 
-現在のWi-Fi/WebSocket経路を維持したまま、USB接続されたWindows PC上のRelayを
-Stack-chanから利用できるUSB経路を追加する。
+Wi-Fi/WebSocket経路を維持したまま、USB接続されたWindows PC上のRelayを
+Stack-chanから利用できるUSB経路を追加した。
 
 利用者はStack-chan本体のSettings（Volume調整）ページから`AUTO`、`Wi-Fi`、
 `USB`を選択できる。USBモードはStack-chanがWi-Fiへ接続できない環境でも会話機能を
@@ -240,7 +245,7 @@ Relayは現在、同じDevice IDからの複数WebSocketを排他しない。経
 閉じてから新経路を開始し、Relay側にもDevice ID単位の接続世代または排他管理を追加する。
 新接続を受け付けたら旧接続を終了し、異なるDevice ID同士の同時接続には影響させない。
 
-## 予定アーキテクチャ
+## 実装アーキテクチャ
 
 ```text
 Stack-chan
@@ -284,7 +289,10 @@ Payload Length、Payload、CRC32を持たせる。SequenceとCRCでHWCDCまた�
 ログフレームとして送信し、音声キューより低い優先度を与える。最終形式はCoreS3での
 帯域・CPU負荷検証後に確定する。
 
-## 実装フェーズ
+## 実装フェーズ（履歴）
+
+以下は実装開始時のチェックリストであり、未完了を示すものではない。実機性能ゲートと
+受け入れ試験は、環境依存の継続確認項目として残している。
 
 ### 1. USB技術検証
 

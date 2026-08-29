@@ -1,12 +1,15 @@
 # 実装・運用ナレッジ（ローカル Relay / Stack-chan）
 
+[日本語](implementation-lessons.md) | [English](en/implementation-lessons.md)
+
 この文書は、ローカル Relay、Foundry Realtime、ヘッドセット試験、Stack-chan
 ファームウェアを統合する過程で発生した事象を時系列で記録する。各項目は、症状だけ
 でなく、原因、採った対処、今後守るべき設計上の判断を残すことを目的とする。
 
 ## 前提
 
-- 端末と Relay の間は PCM16 / 24 kHz / mono の WebSocket Binary Frame を使う。
+- 端末と Relay の間は PCM16 / 24 kHz / mono のバイナリ音声を使う。Wi-Fi経路では
+  WebSocket Binary Frame、USB経路ではCOBS/CRC付きUSB封筒で同じJSON・PCMを運ぶ。
 - Foundry Realtime は `gpt-realtime-2.1`、Web 検索は Responses API の
   `gpt-5.6-terra` を使う。
 - Stack-chan はローカルLAN内の Relay を想定する。既定は `ws://` であり、TLS は
@@ -370,6 +373,234 @@ ESP-NOWはWi-Fiと同じ無線・チャネルを共有する。Relay用Wi-Fiへ�
 3. FACE画面でスティックを動かし、首が物理的に動くことを確認する。
 4. 垂直軸が安全範囲の外へ行かないこと、Relay音声セッション中もリモコンで首だけを
    操作できることを確認する。
+
+### 19. CoreS3上面タッチから会話とスリープを操作できるようにした
+
+画面ページに依存せず会話へ戻れる操作と、明示的に会話・再生を止めて休止姿勢へ移す操作を
+追加した。
+
+**現行仕様**
+
+- 上面を1回タップするとFace画面へ移り、Relay接続済みなら聞き取りを開始する。
+- 2秒以内に上面を2回タップすると、マイクと再生を止めて`conversation.pause`を送り、
+  首を伏せたスリープ姿勢へ移る。
+- Settingsの音量ボタンは短いタップで1段階、500 ms以上の長押しで連続調整する。
+- 画面タップによる会話操作、カメラ領域、横スワイプは従来どおり維持する。
+
+### 20. 猫顔に段階的な待機動作を追加した
+
+会話していない間も端末が固まって見えないように、Face画面の待機を`Active`、
+`LookingAround`、`Sleeping`の3段階に分けた。
+
+**現行仕様**
+
+- Face画面の`ready`または`listening`でカメラワイプが非表示のときだけ自動待機する。
+- 30秒間操作や検出済み発話がないと`LookingAround`へ移り、2〜15秒間隔で猫の視線と首を
+  ランダムに動かす。
+- 見回し開始から5分後に`Sleeping`へ移り、首をホーム位置へ戻して、閉じた目、呼吸、
+  `Z`表示を描画する。
+- タッチ、または聞き取り中に3フレーム連続で音声活動を検出すると`Active`へ復帰する。
+- 自動睡眠は会話を止めない。上面ダブルタップによる明示的スリープだけが
+  `conversation.pause`を送り、マイクと再生を停止する。
+
+**設計判断**
+
+アバターの待機表現と会話セッションの停止は別の状態として扱う。見た目が眠っていても
+聞き取り中なら発話で自然に復帰でき、利用者が明示的に休止させた場合だけ会話を止める。
+
+### 21. CoreS3へUSB Relay経路を追加した
+
+PCとCoreS3をUSB接続し、Windows上のブリッジから既存のローカルRelayを利用できるように
+した。Wi-Fi実装は置き換えず、Settings画面で`AUTO`、`WI-FI`、`USB`を選択し、選択値を
+NVSへ保存する。上位のRelayメッセージとPCM形式は両経路で共通にし、物理転送だけを
+切り替える構成とした。
+
+**実機で確認したハードウェア条件**
+
+- CoreS3はESP32-S3（240 MHz）、16 MB Flash、8 MB PSRAMを搭載する。PlatformIOが表示する
+  RAM上限327,680 bytesは静的配置に使える領域の指標であり、チップの全RAM量や実行時の
+  空きヒープを表す値ではない。
+- USB追加後の実測ビルドは、静的RAM 116,964 / 327,680 bytes（35.7%）、Flash
+  1,895,933 / 6,553,600 bytes（28.9%）だった。
+- 実際のUSB処理はESP32-S3内蔵USB Serial/JTAGのHWCDCを使う。`Serial.begin(115200)`の
+  `115200`は互換API上の設定値であり、USBの物理転送速度を115.2 kbit/sへ制限する値ではない。
+- マイク・スピーカー音声はPCM16 / 24 kHz / monoで、実データ量は48,000 byte/sである。
+  20 msの音声は480 sample、960 byteになる。
+- USBは書き込み、端末ログ、Relay制御、双方向PCMで同じSerial/JTAG経路を共有する。
+  専用の「音声用COMポート」が別に存在するわけではない。
+
+ハードウェア仕様は[M5Stack CoreS3公式仕様](https://docs.m5stack.com/en/core/CoreS3)、
+USB Serial/JTAGの性質は
+[Espressif公式ガイド](https://docs.espressif.com/projects/esp-idf/en/stable/esp32s3/api-guides/usb-serial-jtag-console.html)
+も参照する。後者は、USB Serial/JTAGが再構成可能なUSB-OTG stackではなく、Serial/JTAG用の
+固定機能controllerであることを明記している。
+
+**メモリ量で引っかかる点**
+
+- HWCDCのRX/TXリングは各16 KiBへ拡張し、必ず`Serial.begin()`より前に設定する。開始後に
+  サイズを変更しても、既に確保されたバッファへ反映されない実装がある。
+- COBS処理は受信encoded、受信decoded、送信raw、送信encodedの最大約8 KiB領域を持つ。
+  これにHWCDCのRX/TXリングを加えると、USB用の実行時確保は静的RAMのビルド表示に出ない。
+- カメラ、画面Sprite、スピーカー再生バッファ、Wi-Fi/ESP-NOWも同時にヒープを使用する。
+  ビルド時の`RAM 35.7%`だけを見て余裕があると判断せず、実機で`free heap`と
+  `largest free block`を測る。特にWi-FiとUSBが短時間重なる経路切替時を測定対象にする。
+- PSRAM総量に余裕があっても、USBドライバやDMA、一部のArduino/FreeRTOS構造体は内部RAMを
+  必要とする。PSRAM残量だけでは安定性を判断できない。
+
+**Serialをバイナリ通信へ転用するときの注意**
+
+USB Serial/JTAGにはBoot ROM、Arduino Framework、既存の`Serial.print*`ログも流れる。
+JSONやPCMをそのまま書くと、起動ログが途中へ混ざった時点で境界を復元できなくなる。
+
+現行USB封筒は次を持つ。
+
+- 先頭・末尾のゼロdelimiterとCOBS encoding
+- Protocol Version、Frame Type、16 bit Sequence
+- 32 bit Payload Length、最大8,192 byteのPayload
+- CRC32
+
+送信側はdelimiterを含む1フレームを1回の`Serial.write()`へまとめ、HWCDCの送信mutex区間で
+別ログが割り込む可能性を下げる。受信側はCOBSとCRCが成立しない部分をraw log/noiseとして
+捨て、次のゼロdelimiterから再同期する。単に改行区切りやJSONの括弧数で復元しようと
+しない。
+
+VID `0x303A`はEspressif端末候補を見つけるためにだけ使う。同じVIDの別機器をStack-chanと
+誤認しないよう、Protocol VersionとDevice IDを返すハンドシェイクが成功して初めてCOMを
+占有する。Device TokenはRelay認証へ必要だが、ログやManager状態JSONには出力しない。
+
+**COMを開くだけで再起動・再列挙する場合がある**
+
+PC側でDTR/RTSをfalseにしても、初回列挙、書き込み直後、USB Serial/JTAGドライバの状態に
+よってはCoreS3が一度リセットまたは再列挙する。最初のCOM番号が永続する前提や、一度の
+`serial.Serial.open()`で必ず端末応答が得られる前提を置かない。
+
+- ブリッジは候補ポートを再走査し、端末応答を最大12秒待つ。
+- ホストは0.5秒間隔でprobeを送る。端末は最後のprobeから1.5秒を超えたらホスト不在と
+  判定する。
+- ブリッジ再起動時は、端末に古いUSB接続状態が残っていても`HOST_CLOSE`で同期し直して
+  新しいWebSocketを開く。
+- USB抜去やCOM消失は例外終了ではなく、通常の再検出状態として扱う。
+
+**音声は「帯域に余裕がある」だけでは安定しない**
+
+FoundryやRelayはPCMを実時間より速いburstで返すことがある。TCP/WebSocketは受信側の
+backpressureを使えるが、PCからHWCDCへ8 KiBずつ連続writeすると、CoreS3の16 KiB RXリングを
+短時間で埋められる。メインloopがスピーカー処理や画面描画をしている間にリングが溢れると、
+音声のバリつき、欠落、早送りに聞こえる。
+
+現行ブリッジは出力PCMを960 byte（20 ms）へ分割し、最初に100 ms（約4.8 KiB）だけ先行させ、
+以後は48,000 byte/sでpaceする。8 KiBという値は「USBプロトコルで許す最大payload」であり、
+毎回8 KiB送るべき推奨音声chunkではない。
+
+CoreS3側でも、`playRaw()`へ渡したメモリを再生完了前に上書きしてはいけない。通信受信
+バッファと非同期再生バッファの寿命を分け、複数バッファを循環利用する。USB frame境界は
+音声の意味的境界ではなく、到着順の連続PCMとして扱う。
+
+現行ファームウェアの`write_all()`は短いwriteを再試行するが、最大1秒間メインloopを
+占有しうる。通常はPC側pacingと小さいchunkで回避しているが、長時間のホスト停止や大きな
+上りburstまで保証する仕組みではない。カメラ・UI・音声を止めるほどの待ちが観測されたら、
+USB I/Oを専用FreeRTOSタスクと上限付きqueueへ分離する。
+
+**AUTO/Wi-Fi/USBは選択状態と実経路を分ける**
+
+- `AUTO`は起動後3秒間USBホストを待ち、利用可能ならUSB、利用できなければWi-Fiを開始する。
+- `USB`固定はUSBホストが消えてもWi-Fiへ切り替えず、USB復帰を待つ。
+- `WI-FI`固定はUSBケーブルとブリッジが存在してもWi-Fiを維持する。
+- AUTOのUSB使用中はWi-Fiを停止し、同じ無線を使うESP-NOWもdeinitする。USB切断後に
+  Wi-Fiへ戻す場合は、STA接続とチャネル確定後にESP-NOWを再初期化する。
+- 会話中にUSBが利用可能になっても即時切替せず、応答完了後の`ready`で次の
+  `audio.start`を送る前に切り替える。
+
+「ユーザーが選んだモード」「現在使っている物理経路」「Wi-Fiリンク状態」「USBホスト状態」
+「Relay/Agent状態」を1個のenumへ詰め込まない。経路切替では録音停止、再生停止、旧Relay切断、
+無線停止/開始、新Relay接続の順序を守る。切替は新しいRelay/Foundryセッションになるため、
+会話文脈を保持できるものとして扱わない。
+
+Relay側ではDevice ID単位で接続を排他し、新しいUSB/Wi-Fi接続が成立したら残っている旧接続を
+閉じる。端末側のTCP切断検出だけに任せると、切替時に同じDevice IDのFoundryセッションが
+二重化する。
+
+**Windowsブリッジで発生した固有問題**
+
+- `pyserial`の`baudrate=115200`はAPIとして必要でも、HWCDCの実効帯域を表さない。
+- COM read/writeは専用threadで行い、WebSocketと状態機械はasyncio event loopで扱う。
+  シリアルのblocking readをevent loopへ直接置かない。
+- 音声frameごと（20 ms間隔）にManager用状態JSONを書いていたため、不要なディスクI/Oと
+  event loopの停止が発生した。状態更新は最大4回/秒へ制限する。
+- WindowsではManagerが状態JSONを読んでいる瞬間に一時ファイルを`replace()`すると
+  `PermissionError`になることがある。この観測用ファイルの失敗でUSB reader taskを
+  終了させると「ブリッジが周期的に落ちる」症状になる。状態書き込みはbest effortとし、
+  例外を通信処理へ伝播させない。
+- ブリッジ、PlatformIO upload、serial monitorは同じCOMを同時に開けない。Managerを
+  COM所有者とし、ファームウェア書き込み直前にブリッジを停止し、成功・失敗にかかわらず
+  `finally`で再開する。手動monitor時も先にManagerからブリッジを停止する。
+
+**設定と障害切り分けで引っかかる点**
+
+Wi-Fi RelayのPCアドレスはファームウェアへコンパイルされる。PCのDHCPアドレスが変わったら
+`deploy-from-relay.ps1`で現在のLAN IPv4を選び直して再書き込みする。`0.0.0.0`や
+`127.0.0.1`をStack-chanの接続先には使えない。書き込みスクリプトはLAN側`/healthz`を確認し、
+COMを一時解放してuploadし、その後ブリッジを再開する。
+
+USB固有かを比較するときは、画面を`WI-FI`へ切り替えるだけではPC上のUSBブリッジprocessは
+残る。データ経路だけを除外する試験と、Managerからブリッジ自体を停止する試験を分ける。
+今回のブラウザFunctionのChromium例外はWi-Fiデータ経路でも再現しており、COBS/CRCやUSB PCM
+転送を直接原因とは断定できなかった。時間的にUSB追加後に現れた問題でも、端末経路、PCの
+兄弟process、Relayの起動contextを段階的に外して判断する。
+
+**確認済み範囲と残る耐久試験**
+
+COM3実機でUSB接続、USB停止後のWi-Fi復帰、USB再開後の再接続、CRC不一致0、Sequence欠損0を
+確認した。これらは基本的な実現可能性を示すが、30分の双方向連続転送、USB抜き差し100回、
+PCスリープ・復帰20回、カメラ同時使用時の最小空き内部heapは未完了である。短時間の成功を
+量産・長時間運用の保証へ読み替えず、リリース前に耐久値を測定して記録する。
+
+### 22. WindowsのブラウザFunctionを対話プロセスへ分離した
+
+Stack-chanからURLを開くFunctionを実行すると、Relayは成功を返した後にChromeまたはEdgeが
+`0x80000003`のアプリケーションエラーダイアログを表示した。失敗したChromium processは
+ダイアログの背後で生存していたため、`Popen.pid > 0`を成功条件にすると障害を見逃した。
+
+**切り分けで得た知見**
+
+- ChromiumをRelayの子processとして直接起動する経路で再現した。Chrome固有ではなくEdgeでも
+  同じ例外クラスが発生したため、実行ファイルの選択だけでは解決しなかった。
+- USB経路で発生した問題でも、Wi-Fi WebSocket経路で再現すればCOBS/CRC、USB音声転送、COMの
+  データ破損は発生条件から外せる。ただしPC上のUSBブリッジprocessは残りうるため、端末を
+  `WI-FI`へ切り替える試験と、Manager APIでブリッジ自体を停止する試験を分ける。
+- `explorer.exe URL`をRelayから起動するとChromiumのクラッシュは消えたが、ページは開かなかった。
+  同じWindows Session 1にいるだけでは、管理対象processから対話型Explorerへの引き渡しを
+  保証できない。
+- 対話型PowerShellからExplorerへの正常な引き渡しでも終了コード`1`が返った。Explorerの
+  終了コードや子processのPIDだけでは、利用者のブラウザにページが表示されたことを証明できない。
+- ネイティブ例外ダイアログが開いている間はWindows Error Reportingのイベントが確定せず、
+  processも応答中に見える場合がある。イベントログはダイアログを閉じた後に採取する。
+
+**対処と現行仕様**
+
+- WindowsのブラウザFunctionは、RelayからChromiumを直接起動せず、`127.0.0.1:8787`だけで
+  listenするLocal Managerの専用エンドポイントへ検証済みURLを送る。
+- Managerは対話ユーザーのcontextで`explorer.exe URL`を実行し、既存の既定ブラウザと
+  プロファイルへ引き渡す。任意の実行ファイル名、オプション、shell commandは受け付けない。
+- Relay側とManager側の両方で、`http`/`https`限定、URL内資格情報の拒否、任意のドメイン
+  許可リストを検査する。IPC境界を追加しても、呼び出し側だけの検証へ依存しない。
+- brokerへ接続できない、要求を拒否された、または起動処理が失敗した場合はFunction errorを
+  返す。process生成だけで`status=opened`を返さない。
+- ManagerとRelayは別processなので、実装変更後は両方を再起動する。Relayだけの再起動では
+  Manager側のbroker変更は読み込まれない。
+
+**確認手順**
+
+1. Managerのbrokerへ安全なURLを直接POSTし、既存ブラウザプロファイルで開くことを確認する。
+2. USBブリッジをManager APIで完全停止し、Wi-Fi接続ログを確認してFunctionを3回実行する。
+3. Stack-chanをUSBへ切り替え、ManagerでCOMポートと`relay_connected=true`を確認して、
+   Functionを3回実行する。
+4. 各回でページ表示、アプリケーションエラーダイアログがないこと、Function結果、孤立した
+   Chromium processがないことを確認する。
+
+今回の実機確認では、Wi-FiとUSBの両方で3回連続して既存Chromeセッションにページが開き、
+アプリケーションエラーダイアログは発生しなかった。自動テストはRelay全体で69件成功し、
+CoreS3 firmware buildも成功した。
 
 ## ファームウェアを書き込んだ場合の期待動作
 
