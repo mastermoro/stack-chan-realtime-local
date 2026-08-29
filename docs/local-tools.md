@@ -1,18 +1,20 @@
-# Windows local tools
+[English](en/local-tools.md)
 
-The Relay can expose a small allow-list of Windows-local actions to Foundry
-Realtime Function Calling. It does not expose a command shell.
+# Windows ローカルツール
 
-## Browser tool
+Relay は、少数の許可リストに登録された Windows ローカルアクションを Foundry Realtime Function Calling に
+公開できる。コマンドシェルは公開しない。
 
-Enable it in `relay/.env`:
+## ブラウザーツール
+
+`relay/.env` で有効にする:
 
 ```dotenv
 LOCAL_BROWSER_TOOL_ENABLED=true
 LOCAL_BROWSER_ALLOWED_DOMAINS=microsoft.com,github.com,localhost
 ```
 
-The registered function is:
+登録される関数は次のとおり:
 
 ```json
 {
@@ -23,33 +25,30 @@ The registered function is:
 }
 ```
 
-The Relay validates the URL and sends it to the loopback-only Local Manager.
-The Manager repeats the same validation, then hands the URL to the interactive
-Windows Explorer session so it opens in the user's default browser and profile.
-Both the Manager and Relay must be running. Only HTTP and HTTPS are accepted.
-URLs containing credentials are rejected. When an allow-list is configured,
-exact domains and their subdomains are accepted.
+Relay は URL を検証し、ループバックのみで動作する Local Manager に送信する。
+Manager は同じ検証を繰り返した後、URL を対話型の Windows Explorer セッションに渡し、
+ユーザーのデフォルトブラウザーとプロファイルで開く。Manager と Relay の両方が実行中でなければならない。
+受け付けるのは HTTP と HTTPS のみである。認証情報を含む URL は拒否される。
+許可リストが設定されている場合は、完全一致するドメインとそのサブドメインが許可される。
 
-## Adding another local action
+## 別のローカルアクションの追加
 
-Add each capability as a named implementation in
-`relay/app/tools/local_actions.py`:
+各機能を名前付き実装として `relay/app/tools/local_actions.py` に追加する:
 
-1. Add a narrow JSON schema to `tool_definitions()`.
-2. Add the name to `supports()`.
-3. Validate every argument before causing a side effect.
-4. Return a small JSON-serializable result.
-5. Add success, rejection, and disabled-state tests.
-6. Add a separate environment switch; keep the default disabled.
+1. 対象を限定した JSON スキーマを `tool_definitions()` に追加する。
+2. 名前を `supports()` に追加する。
+3. 副作用を発生させる前に、すべての引数を検証する。
+4. 小さな JSON シリアライズ可能な結果を返す。
+5. 成功、拒否、無効状態のテストを追加する。
+6. 個別の環境変数スイッチを追加し、デフォルトは無効のままにする。
 
-Do not add a generic `run_command`, `powershell`, `open_file`, or arbitrary
-Python evaluation function. Prefer purpose-built actions such as:
+汎用の `run_command`、`powershell`、`open_file`、または任意の Python 評価関数を追加してはならない。
+次のような用途特化型のアクションを優先する:
 
-- open an allow-listed dashboard
-- show a fixed local status page
-- control a specific home-automation endpoint
-- create a reminder through a dedicated API
+- 許可リストに登録されたダッシュボードを開く
+- 固定されたローカルステータスページを表示する
+- 特定のホームオートメーションエンドポイントを操作する
+- 専用 API を通じてリマインダーを作成する
 
-Actions that send messages, purchase items, delete data, change security
-settings, or expose local files require an explicit confirmation design before
-they are made available to the model.
+メッセージの送信、商品の購入、データの削除、セキュリティ設定の変更、ローカルファイルの公開を行うアクションは、
+モデルから利用可能にする前に、明示的な確認の仕組みを設計する必要がある。

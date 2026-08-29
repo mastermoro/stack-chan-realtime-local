@@ -1,11 +1,13 @@
-# ADR-0003: Treat Relay as the Agent Orchestrator boundary
+**日本語** | [English](../en/adr/0003-relay-as-agent-boundary.md)
 
-Status: Accepted
+# ADR-0003: Relay を Agent Orchestrator の境界とする
 
-## Decision
+ステータス: 承認済み
 
-The Relay is not a transparent audio proxy. It owns authentication, session lifecycle, tool registration/execution, Web Search, policy enforcement, and observability.
+## 決定
 
-## Consequences
+Relay は透過的な音声プロキシではない。認証、セッションライフサイクル、ツールの登録と実行、Web Search、ポリシー適用、可観測性を担う。
 
-Future tools such as MCP, external APIs, or internal knowledge search can be added behind the Relay without firmware protocol changes.
+## 結果
+
+MCP、外部 API、社内ナレッジ検索などの将来のツールは、ファームウェアプロトコルを変更せずに Relay の背後へ追加できる。

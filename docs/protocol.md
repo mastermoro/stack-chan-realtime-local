@@ -1,31 +1,30 @@
-# Stack-chan / Relay protocol v1
+**日本語** | [English](en/protocol.md)
 
-Transport: WebSocket. Use `ws://` only on a trusted local LAN during development;
-use secure WebSocket (`wss://`) for every Internet-facing Relay.
+# Stack-chan / Relay プロトコル v1
 
-## Authentication headers
+このプロトコルは、Wi-Fi WebSocket または後述する USB ブリッジエンベロープを介して、JSON 制御メッセージとバイナリ PCM 音声を転送する。`ws://` は信頼済みのローカル LAN でのみ使用し、インターネットに公開する Relay では必ずセキュア WebSocket（`wss://`）を使用する。
+
+## 認証ヘッダー
 
 ```http
 Authorization: Bearer <DEVICE_TOKEN>
 X-Device-Id: stackchan-001
 ```
 
-## Audio
+## 音声
 
-- WebSocket Binary Frame
-- PCM16 little endian
+- バイナリメッセージ（WebSocket バイナリフレームまたは USB `*_BINARY` ペイロード）
+- PCM16 リトルエンディアン
 - 24,000 Hz
-- mono
-- recommended device frame: 20 ms / 480 samples / 960 bytes
-- Relay-to-device output is split into binary frames of at most 8 KiB so it
-  remains within the ESP WebSocket client's receive limit. A frame boundary is
-  not an audio-message boundary; play frames in received order.
+- モノラル
+- 推奨デバイスフレーム: 20 ms / 480 サンプル / 960 バイト
+- Relay からデバイスへの出力は、最大 8 KiB のバイナリメッセージに分割する。これは ESP WebSocket クライアントと USB エンベロープの両方の上限内に収まる。メッセージ境界は音声の境界ではないため、受信順にメッセージを再生する。
 
-## Device -> Relay JSON
+## デバイス -> Relay JSON
 
 ### hello
 
-Must be the first text frame after connection.
+接続後、最初のテキストフレームとして送信しなければならない。
 
 ```json
 {
@@ -40,7 +39,7 @@ Must be the first text frame after connection.
 }
 ```
 
-### UI/turn controls
+### UI / ターン制御
 
 ```json
 {"type":"audio.start"}
@@ -51,22 +50,13 @@ Must be the first text frame after connection.
 {"type":"ping"}
 ```
 
-Server VAD is authoritative in v0.1. The Relay accepts audio frames only while
-the device state is `listening`; clients must stop their microphone while the
-Relay is thinking, searching, or speaking. `audio.start` / `audio.stop` control
-the client conversation state and are retained for future manual-VAD modes.
-`conversation.pause` stops the current turn while keeping the Realtime session
-and its conversation context available for a later `audio.start`.
-When a WebSocket client has an output-playback position, it should include
-`item_id`, `content_index`, and `audio_end_ms`. The Relay cancels the active
-response and truncates the unheard audio from the conversation history. These
-three fields are optional for simple embedded clients.
+v0.1 では Server VAD を正とする。Relay が音声フレームを受け付けるのは、デバイスの状態が `listening` の間だけである。Relay が思考中、検索中、または発話中の間、クライアントはマイクを停止しなければならない。`audio.start` / `audio.stop` はクライアントの会話状態を制御し、将来の手動 VAD モードのために維持する。`conversation.pause` は現在のターンを停止する一方、Realtime セッションと会話コンテキストを保持し、後続の `audio.start` で再利用できるようにする。
 
-`ui.mode` accepts `standard` or `face`. The Relay updates the Realtime system
-instructions so Face mode uses the cat-like speaking style without resetting
-the conversation context.
+クライアントが出力の再生位置を把握している場合は、`item_id`、`content_index`、`audio_end_ms` を含めることが望ましい。Relay は進行中の応答をキャンセルし、まだ再生されていない音声を会話履歴から切り詰める。単純な組み込みクライアントでは、これら 3 つのフィールドは省略できる。
 
-## Relay -> Device JSON
+`ui.mode` には `standard` または `face` を指定できる。Relay は Realtime のシステム指示を更新し、会話コンテキストをリセットせずに、Face モードで猫らしい話し方を使用する。
+
+## Relay -> デバイス JSON
 
 ```json
 {"type":"session.ready","device_id":"stackchan-001"}
@@ -79,10 +69,9 @@ the conversation context.
 {"type":"pong"}
 ```
 
-`emotion` is advisory UI state. Supported values are `neutral`, `happy`, `sad`,
-`angry`, `surprised`, and `sleepy`; clients must ignore unknown values.
+`emotion` は UI に対する参考情報である。対応する値は `neutral`、`happy`、`sad`、`angry`、`surprised`、`sleepy` であり、クライアントは未知の値を無視しなければならない。
 
-When Web Search is used:
+Web Search を使用した場合:
 
 ```json
 {
@@ -93,9 +82,9 @@ When Web Search is used:
 }
 ```
 
-## USB bridge envelope
+## USB ブリッジエンベロープ
 
-USB mode carries the same JSON text and PCM binary messages through the PC bridge. Each serial packet is COBS encoded and surrounded by zero delimiters. A leading delimiter discards boot/framework log bytes before a frame. The decoded little-endian layout is:
+USB モードでは、同じ JSON テキストおよび PCM バイナリメッセージを PC ブリッジ経由で転送する。各シリアルパケットは COBS エンコードされ、前後をゼロデリミタで囲む。先頭のデリミタにより、フレームより前に出力された起動ログやフレームワークのログバイトを破棄する。デコード後のリトルエンディアンレイアウトは次のとおりである。
 
 ```text
 uint8  envelope_version = 1
@@ -106,6 +95,6 @@ byte   payload[payload_length]   // maximum 8192 bytes
 uint32 crc32                     // header + payload
 ```
 
-Frame types are `HOST_PROBE=0x01`, `DEVICE_STATUS=0x02`, `DEVICE_OPEN=0x03`, `HOST_OPEN_ACK=0x04`, `DEVICE_CLOSE=0x05`, `HOST_CLOSE=0x06`, `DEVICE_TEXT=0x10`, `DEVICE_BINARY=0x11`, `HOST_TEXT=0x20`, `HOST_BINARY=0x21`, `DEVICE_LOG=0x30`, and `ERROR=0x7f`.
+フレームタイプは `HOST_PROBE=0x01`、`DEVICE_STATUS=0x02`、`DEVICE_OPEN=0x03`、`HOST_OPEN_ACK=0x04`、`DEVICE_CLOSE=0x05`、`HOST_CLOSE=0x06`、`DEVICE_TEXT=0x10`、`DEVICE_BINARY=0x11`、`HOST_TEXT=0x20`、`HOST_BINARY=0x21`、`DEVICE_LOG=0x30`、`ERROR=0x7f` である。
 
-The host sends `HOST_PROBE` every 500 ms. The device replies with `DEVICE_STATUS` containing `{"protocol":1,"device_id":"..."}` whether or not USB is the selected Relay route. To open USB as the route, the device sends `DEVICE_OPEN` with its device ID and token; the bridge then opens the authenticated local WebSocket and returns `HOST_OPEN_ACK`. Thereafter `*_TEXT` and `*_BINARY` preserve the WebSocket message types. Sequence gaps and CRC failures are diagnostic counters; a damaged packet is discarded without terminating the stream.
+ホストは 500 ms ごとに `HOST_PROBE` を送信する。USB が選択中の Relay ルートかどうかにかかわらず、デバイスは `{"protocol":1,"device_id":"..."}` を含む `DEVICE_STATUS` で応答する。USB をルートとして開くには、デバイスがデバイス ID とトークンを含む `DEVICE_OPEN` を送信する。続いてブリッジが認証済みのローカル WebSocket を開き、`HOST_OPEN_ACK` を返す。それ以降、`*_TEXT` と `*_BINARY` は WebSocket のメッセージ種別を維持する。シーケンス欠落と CRC エラーは診断カウンターに記録し、破損したパケットはストリームを終了せずに破棄する。

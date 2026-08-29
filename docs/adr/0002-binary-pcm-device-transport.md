@@ -1,13 +1,17 @@
-# ADR-0002: Send raw PCM as WebSocket binary frames between device and Relay
+**日本語** | [English](../en/adr/0002-binary-pcm-device-transport.md)
 
-Status: Accepted
+# ADR-0002: デバイスと Relay の間で生の PCM を WebSocket バイナリフレームとして送信する
 
-## Decision
+ステータス: 承認済み
 
-Stack-chan sends PCM16 24 kHz mono as WebSocket binary frames. JSON is used only for control messages. Base64 conversion is performed by the Relay only when talking to the Realtime API.
+USB Relay モードにより追補: Wi-Fi では引き続き WebSocket バイナリフレームを使用する。USB ルートでは、同じ生 PCM バイナリメッセージのセマンティクスをシリアルエンベロープ内で維持し、Windows ブリッジが Relay WebSocket との変換を行う。
 
-## Consequences
+## 決定
 
-- Less bandwidth and CPU overhead on ESP32/CoreS3.
-- The device protocol stays independent from Foundry-specific event schemas.
-- Relay owns translation between binary device transport and Realtime JSON/base64 events.
+Stack-chan は PCM16 24 kHz モノラル音声を WebSocket バイナリフレームとして送信する。JSON は制御メッセージにのみ使用する。Base64 変換は、Realtime API と通信する際に Relay のみが行う。
+
+## 結果
+
+- ESP32/CoreS3 の帯域幅と CPU のオーバーヘッドを削減できる。
+- デバイスプロトコルを Foundry 固有のイベントスキーマから独立させられる。
+- バイナリのデバイストランスポートと Realtime の JSON/base64 イベントとの変換は Relay が担う。

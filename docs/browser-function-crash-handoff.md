@@ -1,45 +1,48 @@
-# Browser Function crash — agent handoff
+# Browser Functionクラッシュ — エージェント引き継ぎ
 
-Last updated: 2026-08-29 16:12 JST
+[日本語](browser-function-crash-handoff.md) | [English](en/browser-function-crash-handoff.md)
 
-## Resolution
+最終更新: 2026-08-29 16:12 JST
 
-Resolved on 2026-08-29. Chromium crashed when it was launched as a child of the managed Relay
-process. Calling `explorer.exe URL` from Relay avoided the crash but did not reach the interactive
-Explorer process, even though both processes were in Windows Session 1. Its exit code `1` was also
-observed for a successful handoff from an interactive PowerShell process, so that code alone cannot
-prove that a page opened.
+## 解決
 
-The Windows browser action now sends the already validated URL to a dedicated endpoint on the
-loopback-only Local Manager. The Manager repeats the HTTP/HTTPS, credentials, and optional domain
-allow-list checks, then runs `explorer.exe URL` from its interactive process context. The endpoint
-accepts no command or executable arguments.
+2026-08-29に解決した。Chromiumを管理対象Relayプロセスの子プロセスとして起動すると
+クラッシュしていた。Relayから`explorer.exe URL`を呼び出すとクラッシュは回避できたが、
+両プロセスがWindows Session 1にあったにもかかわらず、対話型Explorerプロセスには
+到達しなかった。対話型PowerShellプロセスから正常に引き渡した場合にも終了コード`1`が
+観測されたため、このコードだけではページが開いたことを証明できない。
 
-Verified after restarting both Manager and Relay:
+Windowsのブラウザーアクションは、検証済みのURLをループバック専用Local Managerの
+専用エンドポイントへ送るようになった。ManagerはHTTP/HTTPS、資格情報、任意のドメイン
+許可リストを再検査し、対話型プロセスのコンテキストから`explorer.exe URL`を実行する。
+このエンドポイントはコマンドや実行ファイルの引数を受け付けない。
 
-- Direct Manager broker test opened `https://example.com/` in the existing Chrome profile without
-   an application-error dialog.
-- Three consecutive Function calls over Wi-Fi opened successfully without a dialog while the USB
-   bridge was completely stopped.
-- Stackchan was switched to USB mode and the bridge reported `relay_connected=true` on COM3.
-- Three consecutive Function calls over USB opened successfully without a dialog.
-- Focused automated tests: 13 passed. Full Relay suite: 69 passed. Ruff passed for all four
-   changed Python files, and `git diff --check` passed.
+ManagerとRelayの両方を再起動した後、次を確認した。
 
-The remaining sections preserve the original failure evidence and investigation history.
+- Managerブローカーの直接試験では、アプリケーションエラーダイアログなしに、既存の
+   Chromeプロファイルで`https://example.com/`が開いた。
+- USBブリッジを完全に停止した状態で、Wi-Fi経由のFunction呼び出しを3回連続で行い、
+   いずれもダイアログなしで正常に開いた。
+- StackchanをUSBモードへ切り替え、ブリッジがCOM3で`relay_connected=true`を報告した。
+- USB経由のFunction呼び出しを3回連続で行い、いずれもダイアログなしで正常に開いた。
+- 対象を絞った自動テストは13件成功、Relayの全テストスイートは69件成功した。変更した
+   Pythonファイル4件すべてでRuffが成功し、`git diff --check`も成功した。
 
-## Objective
+以降の節には、当初の障害証跡と調査履歴を残す。
 
-Fix the Windows browser Function so that a URL requested by Stackchan opens in the
-interactive user's default Chrome session without an application-error dialog. The fix must work
-through both the Wi-Fi and USB Relay transports and must preserve the URL/domain security checks.
+## 目的
 
-Do not reset or clean the worktree. The USB mode implementation and subsequent fixes are currently
-uncommitted. The current Git `HEAD` is `a151dcd`.
+Stackchanが要求したURLを、アプリケーションエラーダイアログなしに対話ユーザーの既定の
+Chromeセッションで開けるよう、WindowsのブラウザーFunctionを修正する。この修正は
+Wi-FiとUSBの両Relayトランスポートで動作し、URL/ドメインのセキュリティ検査を維持する
+必要がある。
 
-## Current failure
+ワークツリーをリセットまたはクリーンアップしない。USBモード実装とその後の修正は
+現在コミットされていない。現在のGit `HEAD`は`a151dcd`である。
 
-The Function launches a Chromium process, reports success to the model, and then Windows displays:
+## 当時の障害
+
+FunctionがChromiumプロセスを起動してモデルへ成功を報告した後、Windowsに次が表示された。
 
 ```text
 chrome.exe - Application Error
@@ -47,33 +50,33 @@ The exception unknown software exception (0x80000003) occurred in the applicatio
 at location 0x00007FF9023D9D60.
 ```
 
-The Japanese dialog shown to the user has the same values. `0x80000003` is a breakpoint exception.
-The failed process remains alive behind the modal error dialog, so `Popen.pid > 0` is not a valid
-success check.
+ユーザーに表示された日本語ダイアログも同じ値だった。`0x80000003`はブレークポイント例外
+である。障害プロセスはモーダルエラーダイアログの背後で生存し続けるため、
+`Popen.pid > 0`は有効な成功判定ではない。
 
-An earlier reproduction showed the same exception class in `msedge.exe`. This is not known to be
-specific to Chrome itself; both installed browsers are Chromium-based.
+それ以前の再現では、`msedge.exe`でも同じ例外クラスが発生した。Chrome自体に固有の問題とは
+判明しておらず、インストールされていた両ブラウザーはいずれもChromiumベースである。
 
-Installed versions at the time of reproduction:
+再現時にインストールされていたバージョン:
 
 - Google Chrome: `151.0.7922.175`
 - Microsoft Edge: `151.0.4129.107`
 
-## Wi-Fi/USB isolation result
+## Wi-Fi/USB切り分け結果
 
-The failure reproduces over a confirmed Wi-Fi WebSocket path, so USB framing/audio forwarding is
-not required to trigger it.
+確認済みのWi-Fi WebSocket経路でも障害が再現したため、発生条件にUSBフレーミングや音声転送は
+必要ない。
 
-Current Wi-Fi test topology:
+当時のWi-Fi試験構成:
 
-- Relay PC IPv4: `192.168.1.107`
-- Stackchan IPv4: `192.168.1.105`
-- Relay endpoint compiled into firmware: `ws://192.168.1.107:8080/v1/realtime`
-- Relay log: `192.168.1.105:57615 - "WebSocket /v1/realtime" [accepted]`
-- Firmware log: `Relay transport selected: Wi-Fi`, then `Relay WebSocket connected`
-- USB bridge state during the Wi-Fi reproduction: `ready`, `relay_connected=false`
+- Relay PCのIPv4: `192.168.1.107`
+- StackchanのIPv4: `192.168.1.105`
+- ファームウェアへコンパイルされたRelayエンドポイント: `ws://192.168.1.107:8080/v1/realtime`
+- Relayログ: `192.168.1.105:57615 - "WebSocket /v1/realtime" [accepted]`
+- ファームウェアログ: `Relay transport selected: Wi-Fi`、続いて`Relay WebSocket connected`
+- Wi-Fi再現中のUSBブリッジ状態: `ready`、`relay_connected=false`
 
-The most recent Wi-Fi reproduction was:
+直近のWi-Fi再現時のログ:
 
 ```text
 2026-08-29 15:50:28,752 INFO app.tools.local_actions
@@ -82,26 +85,27 @@ browser launch requested executable=chrome.exe pid=7052
 local browser opened host=tenki.jp
 ```
 
-The user then observed the Chrome `0x80000003` dialog. PID 7052 was still `Responding=True`, with no
-main window title, because the native exception dialog had not yet been dismissed.
+その後、ユーザーがChromeの`0x80000003`ダイアログを確認した。ネイティブ例外ダイアログが
+まだ閉じられていなかったため、PID 7052はメインウィンドウタイトルがないまま
+`Responding=True`だった。
 
-Important remaining isolation test: although the device data path was Wi-Fi, the USB bridge process
-was still running and probing COM3. Stop it completely with the Manager API and repeat once before
-concluding that the USB bridge process cannot contribute:
+重要な未実施の切り分け試験として、端末データ経路はWi-Fiだったが、USBブリッジプロセスは
+動作したままCOM3を探索していた。USBブリッジプロセスが影響しないと結論づける前に、
+Manager APIで完全に停止してもう一度再現する必要があった。
 
 ```powershell
 Invoke-RestMethod -Method Post http://127.0.0.1:8787/api/usb/stop
 ```
 
-Restart it afterward if needed:
+必要に応じて、その後に次で再起動する。
 
 ```powershell
 Invoke-RestMethod -Method Post http://127.0.0.1:8787/api/usb/start
 ```
 
-## Browser implementation history
+## ブラウザー実装の履歴
 
-The committed pre-USB implementation in `HEAD` is only:
+`HEAD`にコミットされているUSB実装前の処理は次だけである。
 
 ```python
 @staticmethod
@@ -109,30 +113,31 @@ def _open_browser(url: str) -> bool:
     return webbrowser.open(url, new=2, autoraise=True)
 ```
 
-Relevant file: `relay/app/tools/local_actions.py`.
+関連ファイル: `relay/app/tools/local_actions.py`。
 
-That implementation selected Edge in the current Windows environment and produced an Edge
-application-error dialog. The user stated Chrome is the default browser, but this process could not
-read:
+この実装は当時のWindows環境でEdgeを選択し、Edgeのアプリケーションエラーダイアログを
+発生させた。ユーザーによると既定のブラウザーはChromeだったが、このプロセスは次を
+読み取れなかった。
 
 ```text
 HKCU\Software\Microsoft\Windows\Shell\Associations\UrlAssociations\https\UserChoice
 ```
 
-`HKCR\ChromeHTML\shell\open\command` was available and contained:
+`HKCR\ChromeHTML\shell\open\command`は読み取り可能で、内容は次だった。
 
 ```text
 "C:\Program Files\Google\Chrome\Application\chrome.exe" --single-argument %1
 ```
 
-A local, uncommitted workaround then added `_windows_default_browser_executable()` and launched
-Chrome directly. Two variants have been tried:
+その後、ローカルの未コミット回避策で`_windows_default_browser_executable()`を追加し、
+Chromeを直接起動した。次の2案を試した。
 
-1. `chrome.exe --new-window URL` with `CREATE_NEW_PROCESS_GROUP`: Chrome crashed.
-2. `chrome.exe --single-argument URL` without `CREATE_NEW_PROCESS_GROUP`: a direct command-line
-   smoke test appeared to hand off successfully, but real Function calls still crash Chrome.
+1. `CREATE_NEW_PROCESS_GROUP`付きの`chrome.exe --new-window URL`: Chromeがクラッシュした。
+2. `CREATE_NEW_PROCESS_GROUP`なしの`chrome.exe --single-argument URL`: コマンドラインからの
+   直接スモークテストでは正常に引き渡したように見えたが、実際のFunction呼び出しでは
+   引き続きChromeがクラッシュした。
 
-Actual Function reproductions after direct Chrome selection:
+Chromeを直接選択した後の実際のFunction再現:
 
 ```text
 15:41:24 host=weathernews.jp pid=28312  # USB path, Chrome error
@@ -140,98 +145,99 @@ Actual Function reproductions after direct Chrome selection:
 15:50:28 host=tenki.jp pid=7052         # confirmed Wi-Fi path, Chrome error
 ```
 
-Therefore, do not treat the current direct-executable workaround as a fix. Compare against `HEAD`
-before editing:
+したがって、現在の実行ファイル直接起動による回避策を修正済みとは扱わない。編集前に
+`HEAD`と比較する。
 
 ```powershell
 git diff HEAD -- relay/app/tools/local_actions.py
 git show HEAD:relay/app/tools/local_actions.py
 ```
 
-## Process context
+## プロセスコンテキスト
 
-The Manager starts Relay with `subprocess.Popen()` from `relay/local_manager.py`. The Relay then
-calls `_open_browser()` inside `asyncio.to_thread()`.
+Managerは`relay/local_manager.py`から`subprocess.Popen()`でRelayを起動する。その後Relayは
+`asyncio.to_thread()`内で`_open_browser()`を呼び出す。
 
-The virtual environment launcher produces two Python process entries per service on this machine:
+このマシンでは、仮想環境ランチャーによりサービスごとに2つのPythonプロセスエントリが
+生成される。
 
 - `relay/.venv/Scripts/python.exe`
 - the underlying `C:/Users/user/.platformio/python3/python.exe`
 
-There are currently three expected service pairs: Manager, Relay, and USB bridge. Do not assume
-these pairs are duplicate Relay instances without checking parent/command-line information.
+想定されるサービスの組はManager、Relay、USBブリッジの3つである。親プロセスと
+コマンドライン情報を確認せず、これらの組をRelayの重複インスタンスと判断しない。
 
-The Relay process redirects stdout/stderr to:
+Relayプロセスはstdout/stderrを次へリダイレクトする。
 
 ```text
 %TEMP%\stackchan-relay\relay.log
 ```
 
-USB bridge logging is at:
+USBブリッジのログは次にある。
 
 ```text
 %TEMP%\stackchan-relay\usb-bridge.log
 ```
 
-The Relay launcher itself was not materially changed by the USB work; the USB work added a sibling
-bridge process and Manager supervision. This makes process context, Chromium state/update, injected
-modules, or an interaction with the additional bridge process more plausible than corruption of a
-URL over the transport.
+Relayランチャー自体はUSB対応で実質的に変更されておらず、USB対応では兄弟ブリッジ
+プロセスとManagerによる監督が追加された。そのため、トランスポート上でのURL破損より、
+プロセスコンテキスト、Chromiumの状態/更新、注入モジュール、または追加ブリッジプロセス
+との相互作用の可能性が高いと考えられた。
 
-## Why Relay currently reports a false success
+## Relayが誤って成功を報告していた理由
 
-`LocalActionExecutor.execute()` considers the launch successful when `_open_browser()` returns
-true. The current implementation returns true immediately when `subprocess.Popen()` provides a
-positive PID. It does not wait for startup, inspect the return code, or detect a native exception
-dialog. Relay logs therefore say `local browser opened` even when Windows immediately shows the
-error.
+`LocalActionExecutor.execute()`は`_open_browser()`がtrueを返すと起動成功と判断する。当時の
+実装は`subprocess.Popen()`から正のPIDが得られると直ちにtrueを返していた。起動完了を待たず、
+終了コードの確認もネイティブ例外ダイアログの検出も行わない。そのため、Windowsが直後に
+エラーを表示してもRelayログには`local browser opened`と記録された。
 
-## Recommended investigation order
+## 推奨していた調査順序
 
-1. Preserve the dirty worktree and confirm the current device is still on Wi-Fi.
-2. Stop the USB bridge process completely and reproduce the Function once over Wi-Fi.
-3. Dismiss the error dialog, then query Application Error / Windows Error Reporting events. Events
-   were empty while the modal dialog was still active, so collect them after dismissal.
-4. If permitted, collect a dump/module list for the failed Chrome PID. Chrome Crashpad paths were
-   not readable in the normal workspace sandbox and may require approval.
-5. Compare these launch contexts with the same URL:
-   - an interactive PowerShell/Python process;
-   - the managed Relay Function;
-   - Windows `ShellExecute`/Explorer handoff;
-   - a small interactive-user browser broker process, if needed.
-6. Determine whether the failure follows the Relay parent/job/environment or merely coincides with
-   Chromium 151. Direct execution from an approved interactive tool command did not immediately
-   reproduce, while the real Relay Function consistently did.
-7. Implement startup/error detection so the Function cannot return `opened` merely from a PID.
+1. 変更のあるワークツリーを維持し、現在の端末が引き続きWi-Fiを使用していることを確認する。
+2. USBブリッジプロセスを完全に停止し、Wi-Fi経由でFunctionを一度再現する。
+3. エラーダイアログを閉じてから、Application Error / Windows Error Reportingイベントを
+   照会する。モーダルダイアログが有効な間はイベントが空だったため、閉じた後に収集する。
+4. 許可される場合は、障害が起きたChrome PIDのダンプ/モジュール一覧を収集する。通常の
+   ワークスペースサンドボックスではChrome Crashpadのパスを読み取れず、承認が必要な
+   可能性がある。
+5. 同じURLについて、次の起動コンテキストを比較する。
+   - 対話型PowerShell/Pythonプロセス
+   - 管理対象Relay Function
+   - Windows `ShellExecute`/Explorerへの引き渡し
+   - 必要な場合は、小規模な対話ユーザー用ブラウザーブローカープロセス
+6. 障害がRelayの親/ジョブ/環境に追随するのか、単にChromium 151と同時期に発生したのかを
+   判断する。承認済み対話ツールコマンドから直接実行した場合は直ちには再現しなかったが、
+   実際のRelay Functionでは一貫して再現した。
+7. PIDを得ただけでFunctionが`opened`を返さないよう、起動/エラー検出を実装する。
 
-A dedicated browser broker is a reasonable fallback architecture if Chromium consistently crashes
-only when spawned from Relay: start the broker in the interactive desktop context and send only
-validated HTTP/HTTPS URLs to it over a narrowly scoped local IPC channel. Do not add arbitrary
-command execution.
+Relayから生成した場合に限ってChromiumが一貫してクラッシュするなら、専用ブラウザー
+ブローカーは妥当な代替アーキテクチャである。対話デスクトップのコンテキストでブローカーを
+起動し、限定的なローカルIPCチャネルを介して検証済みHTTP/HTTPS URLだけを送る。任意の
+コマンド実行は追加しない。
 
-## Security constraints to preserve
+## 維持するセキュリティ制約
 
-- Only `http` and `https` URLs.
-- Reject credentials embedded in URLs.
-- Keep the optional allowed-domain enforcement.
-- Do not execute a shell command constructed from a model-provided URL.
-- Do not expose `.env`, `stackchan/include/secrets.hpp`, tokens, or Wi-Fi credentials in logs or
-  handoff notes.
+- URLは`http`と`https`だけを許可する。
+- URLに埋め込まれた資格情報を拒否する。
+- 任意設定の許可ドメイン制約を維持する。
+- モデルが与えたURLから構築したシェルコマンドを実行しない。
+- `.env`、`stackchan/include/secrets.hpp`、トークン、Wi-Fi資格情報をログや引き継ぎメモに
+  露出させない。
 
-## Relevant files
+## 関連ファイル
 
-- `relay/app/tools/local_actions.py` — browser Function and current workaround
-- `relay/tests/test_local_actions.py` — Function validation/launcher tests
-- `relay/app/session/orchestrator.py` — Function dispatch and result handling
-- `relay/local_manager.py` — Relay and USB bridge process supervision
-- `relay/app/usb/bridge.py` — sibling USB bridge process
-- `relay/app/gateway/websocket.py` — transport-independent device WebSocket entry point
-- `docs/usb-relay-mode-plan.md` — USB feature plan and implementation notes
+- `relay/app/tools/local_actions.py` — ブラウザーFunctionと当時の回避策
+- `relay/tests/test_local_actions.py` — Function検証/ランチャーテスト
+- `relay/app/session/orchestrator.py` — Functionディスパッチと結果処理
+- `relay/local_manager.py` — RelayとUSBブリッジのプロセス監督
+- `relay/app/usb/bridge.py` — 兄弟USBブリッジプロセス
+- `relay/app/gateway/websocket.py` — トランスポート非依存の端末WebSocketエントリポイント
+- `docs/usb-relay-mode-plan.md` — USB機能計画と実装メモ
 
-## Tests and operational notes
+## テストと運用上の注意
 
-The local `.env` enables the browser action, so the test that assumes the default disabled setting
-needs an explicit environment override:
+ローカル`.env`ではブラウザーアクションが有効なため、既定で無効と仮定するテストには
+明示的な環境変数の上書きが必要である。
 
 ```powershell
 cd relay
@@ -240,22 +246,22 @@ $env:LOCAL_BROWSER_TOOL_ENABLED = 'false'
 .\.venv\Scripts\python.exe -m ruff check app/tools/local_actions.py tests/test_local_actions.py
 ```
 
-The current launcher tests pass, but they mock `Popen` and only prove argument construction; they do
-not cover the native Windows failure.
+当時のランチャーテストは成功していたが、`Popen`をモックして引数の構築だけを確認するため、
+Windowsネイティブの障害は対象外だった。
 
-After changing Relay code, restart Relay through the Manager so the new module is loaded:
+Relayコードの変更後は、新しいモジュールを読み込むためManager経由でRelayを再起動する。
 
 ```powershell
 Invoke-RestMethod -Method Post http://127.0.0.1:8787/api/stop
 Invoke-RestMethod -Method Post http://127.0.0.1:8787/api/start
 ```
 
-## Acceptance criteria
+## 受け入れ条件
 
-- Three consecutive browser Function calls over Wi-Fi open the requested URL without a Chrome/Edge
-  application-error dialog.
-- Three consecutive calls over USB do the same.
-- The Function uses the intended interactive Chrome profile/session.
-- No orphaned crashed Chromium process remains.
-- A launch failure is reported as a Function error instead of `status=opened`.
-- Existing URL validation/domain restrictions and all relevant automated tests remain intact.
+- Wi-Fi経由でブラウザーFunctionを3回連続で呼び出し、Chrome/Edgeのアプリケーションエラー
+   ダイアログなしに要求したURLが開く。
+- USB経由でも3回連続の呼び出しが同様に成功する。
+- Functionが意図した対話型Chromeプロファイル/セッションを使用する。
+- クラッシュして孤立したChromiumプロセスが残らない。
+- 起動失敗を`status=opened`ではなくFunctionエラーとして報告する。
+- 既存のURL検証/ドメイン制約と関連するすべての自動テストが維持される。

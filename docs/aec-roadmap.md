@@ -1,21 +1,21 @@
-# AEC and full-duplex implementation roadmap
+[English](en/aec-roadmap.md)
 
-This repository is local-first at the Relay layer, but acoustic echo
-cancellation still runs on the CoreS3. The Windows Relay remains responsible
-for Foundry sessions, Function Calling, and local PC actions.
+# AEC と全二重通信の実装ロードマップ
 
-## Invariants
+このリポジトリは Relay レイヤーではローカルファーストだが、音響エコーキャンセレーションは引き続き
+CoreS3 上で実行する。Windows Relay は引き続き Foundry セッション、Function Calling、
+ローカル PC アクションを担当する。
 
-- The existing half-duplex path remains the safe fallback.
-- Network audio remains PCM16, 24 kHz, mono.
-- AEC processing uses a separate 16 kHz internal boundary.
-- The playback reference is copied only from PCM accepted by the speaker TX
-  path, after volume and format conversion.
-- Audio tasks do not perform JSON parsing, browser actions, screen drawing,
-  allocation, file writes, or network sends.
-- A failure reduces capability instead of rebooting the device.
+## 不変条件
 
-## Target pipeline
+- 既存の半二重経路を安全なフォールバックとして維持する。
+- ネットワーク音声は PCM16、24 kHz、mono のままとする。
+- AEC 処理には独立した 16 kHz の内部境界を使用する。
+- 再生リファレンスは、音量とフォーマットの変換後に speaker TX 経路が受け付けた PCM からのみコピーする。
+- 音声タスクでは JSON 解析、ブラウザー操作、画面描画、メモリ割り当て、ファイル書き込み、ネットワーク送信を行わない。
+- 障害発生時はデバイスを再起動せず、機能を縮退させる。
+
+## 目標パイプライン
 
 ```text
 Foundry -> Windows Relay -> 24 kHz playback ring
@@ -27,7 +27,7 @@ CoreS3 mic RX -> capture ring -> 16 kHz
   -> 16-to-24 kHz -> Windows Relay -> Foundry
 ```
 
-## Planned firmware files
+## 計画中のファームウェアファイル
 
 ```text
 stackchan/include/audio/audio_types.hpp
@@ -48,68 +48,65 @@ stackchan/src/audio/audio_pipeline.cpp
 stackchan/src/conversation_controller.cpp
 ```
 
-Pure data structures and state machines must have PlatformIO native tests
-before they are connected to CoreS3 hardware.
+純粋なデータ構造とステートマシンには、CoreS3 ハードウェアへ接続する前に PlatformIO native テストを用意すること。
 
-## Milestones
+## マイルストーン
 
-### A0 — Reproducible baseline
+### A0 — 再現可能なベースライン
 
-- Pin the Espressif platform and firmware libraries.
-- Build the unchanged half-duplex firmware in CI.
-- Record RAM and Flash use.
+- Espressif プラットフォームとファームウェアライブラリのバージョンを固定する。
+- 変更前の半二重ファームウェアを CI でビルドする。
+- RAM と Flash の使用量を記録する。
 
-Status: implemented in this repository. The pinned baseline builds for CoreS3.
+ステータス: このリポジトリで実装済み。固定されたベースラインは CoreS3 向けにビルドできる。
 
-### A1 — Diagnostics
+### A1 — 診断
 
-Add one-second aggregate metrics:
+1 秒単位の集計メトリクスを追加する:
 
-- mic, reference, and processor-output RMS/peak
-- capture/playback/reference ring fill and high-water marks
-- I2S timeout/drop counts
-- received, queued, submitted, and estimated-played samples
-- AEC/processor average and maximum execution time
-- internal heap, largest block, PSRAM, and task stack low-water marks
+- mic、reference、processor-output の RMS/peak
+- capture/playback/reference ring の充填量と high-water mark
+- I2S timeout/drop の回数
+- received、queued、submitted、estimated-played のサンプル数
+- AEC/processor の平均実行時間と最大実行時間
+- internal heap、largest block、PSRAM、task stack の low-water mark
 
-Detailed PCM capture remains opt-in and must never be committed.
+詳細な PCM キャプチャは引き続きオプトインとし、絶対にコミットしてはならない。
 
-### A2 — Fixed audio rings and clocks
+### A2 — 固定音声リングとクロック
 
-- Add fixed-capacity SPSC rings with no runtime allocation.
-- Track 64-bit sample positions rather than relying on `millis()`.
-- Separate WebSocket frame boundaries from processing frame boundaries.
-- Add native tests for wrap, overflow, underflow, and time conversion.
+- 実行時にメモリを割り当てない固定容量の SPSC ring を追加する。
+- `millis()` に依存せず、64-bit のサンプル位置を追跡する。
+- WebSocket のフレーム境界と処理のフレーム境界を分離する。
+- wrap、overflow、underflow、time conversion の native テストを追加する。
 
-### A3 — Audio I/O ownership
+### A3 — Audio I/O の所有権
 
-- Move all microphone and speaker lifecycle management out of `main.cpp`.
-- Preserve `M5AudioHal` as the legacy half-duplex backend.
-- Add an `AudioDevice` contract for capture, TX acceptance, queue depth,
-  capabilities, counters, and stop/restart.
-- Route current behavior through `AudioPipeline + PassThroughProcessor`.
+- マイクとスピーカーのライフサイクル管理をすべて `main.cpp` の外へ移す。
+- `M5AudioHal` を従来の半二重バックエンドとして維持する。
+- capture、TX acceptance、queue depth、capabilities、counters、stop/restart のための `AudioDevice` 契約を追加する。
+- 現在の動作を `AudioPipeline + PassThroughProcessor` 経由にする。
 
-### A4 — CoreS3 full-duplex hardware gate
+### A4 — CoreS3 全二重ハードウェアゲート
 
-- Add a feature-gated backend that owns shared I2S RX/TX and both codecs.
-- Validate simultaneous ES7210 capture and AW88298 playback without AEC.
-- Run 10-second functional and 30-minute soak tests with Wi-Fi, camera, and
-  servo load.
+- 共有 I2S RX/TX と両方の codec を所有する、機能フラグ付きバックエンドを追加する。
+- AEC なしで ES7210 capture と AW88298 playback の同時動作を検証する。
+- Wi-Fi、camera、servo に負荷をかけた状態で 10-second functional test と 30-minute soak test を実行する。
 
-Do not proceed when RX or TX stops, repeated drops occur, or the device resets.
-The default remains half duplex until this hardware gate passes.
+RX または TX の停止、drop の繰り返し、デバイスのリセットが発生する場合は先へ進まないこと。
+このハードウェアゲートを通過するまでは、デフォルトを半二重のままにする。
 
-### A5 — Playback reference and synchronization
+### A5 — 再生リファレンスと同期
 
-- Tap only speaker-TX-accepted PCM.
-- Track received, queued, submitted, DMA-buffered, and estimated-played samples.
-- Store reference samples on a timestamped timeline.
-- Add a diagnostic delay search over 0–150 ms.
-- Observe long-running mic/playback clock drift and reference fill.
+- speaker-TX-accepted PCM のみを取り出す。
+- received、queued、submitted、DMA-buffered、estimated-played のサンプルを追跡する。
+- リファレンスサンプルをタイムスタンプ付き timeline に保存する。
+- 0–150 ms の範囲で診断用の delay search を追加する。
+- 長時間動作時の mic/playback clock drift と reference fill を観測する。
 
-### A6 — Conversation and fallback states
+### A6 — 会話状態とフォールバック状態
 
-Keep two independent state machines:
+2 つの独立したステートマシンを維持する:
 
 ```text
 Conversation:
@@ -120,60 +117,61 @@ Stopped -> Starting -> HalfDuplex/FullDuplex
                     -> Degraded -> Restarting -> Failed
 ```
 
-Use `output_audio.started` item IDs and estimated played samples when sending
-`conversation.pause`, so the Relay can cancel and truncate unheard output.
+`conversation.pause` を送信するときは `output_audio.started` の item ID と estimated played samples を使用し、
+Relay が未再生の出力をキャンセルして切り詰められるようにする。
 
-Fallback order:
+フォールバック順序:
 
-1. reduce camera/servo/diagnostic load
-2. reduce AEC complexity
-3. disable local barge-in
-4. restart the audio pipeline once
-5. return to legacy half duplex
+1. camera/servo/diagnostic の負荷を下げる
+2. AEC の複雑度を下げる
+3. ローカル barge-in を無効にする
+4. audio pipeline を 1 回再起動する
+5. 従来の半二重へ戻す
 
-Require a stable interval before restoring a higher mode to avoid flapping.
+flapping を避けるため、上位モードへ復帰する前に安定期間を設ける。
 
-### A7 — AEC processing boundary
+### A7 — AEC 処理境界
 
-- Add stateful 24/16 kHz resampling.
-- Adapt arbitrary I2S frames to the processor-required chunk size.
-- Verify exact sample counts over 10 seconds and long-running streams.
-- Keep `PassThroughProcessor` as the comparison and fallback implementation.
+- 状態を保持する 24/16 kHz resampling を追加する。
+- 任意の I2S frame を processor が要求する chunk size に適合させる。
+- 10 seconds および長時間の stream で正確な sample count を検証する。
+- `PassThroughProcessor` を比較用およびフォールバック実装として維持する。
 
 ### A8 — ESP-SR AEC
 
-Initial candidate:
+初期候補:
 
-- one mic and one playback reference
-- PCM16 at 16 kHz
+- 1 つの mic と 1 つの playback reference
+- 16 kHz の PCM16
 - `AEC_MODE_FD_LOW_COST`
 - filter length 4
-- 16-byte aligned working buffers
+- 16-byte aligned working buffer
 
-Evaluate normal and aggressive nonlinear processing with raw mic, reference,
-and processed output measurements. Two-mic and high-performance modes are
-follow-up tuning, not baseline requirements.
+raw mic、reference、processed output の測定値を用いて、normal および aggressive nonlinear processing を評価する。
+Two-mic モードと high-performance モードは後続のチューニング対象であり、ベースライン要件には含めない。
 
-## Acceptance tests
+## 受け入れテスト
 
-| Test | Requirement |
+| テスト | 要件 |
 |---|---|
-| Assistant audio only | no self-interruption |
-| User interrupts at 30 cm | local playback stops within 200 ms |
-| User interrupts at 1 m | normal speech is detected |
-| Maximum speaker volume | no repeated false barge-in |
-| Double talk | user speech remains intelligible |
-| Camera, Wi-Fi, and servo active | no WDT or repeated I2S timeout |
-| 30-minute soak | no monotonic reference drift |
-| AEC init/runtime failure | conversation continues in half duplex |
+| Assistant audio only | self-interruption が発生しない |
+| User interrupts at 30 cm | local playback が 200 ms 以内に停止する |
+| User interrupts at 1 m | normal speech が検出される |
+| Maximum speaker volume | false barge-in が繰り返し発生しない |
+| Double talk | user speech が明瞭に聞き取れる |
+| Camera, Wi-Fi, and servo active | WDT または I2S timeout が繰り返し発生しない |
+| 30-minute soak | 単調な reference drift が発生しない |
+| AEC init/runtime failure | 半二重で会話が継続する |
 
-## Recommended change sequence
+## 推奨する変更順序
 
-1. diagnostics and native test environment
-2. rings, sample clocks, and playback tracking
-3. legacy half-duplex migration behind `AudioPipeline`
-4. playback item tracking and accurate pause/truncate
-5. feature-gated CoreS3 full-duplex backend
-6. reference timeline, resampling, and fallback policy
-7. ESP-SR AEC behind a disabled-by-default feature flag
+1. diagnostics と native test environment
+2. ring、sample clock、playback tracking
+3. `AudioPipeline` の背後への従来の半二重実装の移行
+4. playback item tracking と正確な pause/truncate
+5. 機能フラグ付き CoreS3 全二重バックエンド
+6. reference timeline、resampling、fallback policy
+7. デフォルト無効の機能フラグの背後への ESP-SR AEC の実装
+
+各段階で、既存の半二重フォールバックが引き続き利用できることを確認する。
 
