@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import signal
 import socket
 import subprocess
 import tempfile
@@ -448,6 +449,21 @@ class BrowserBroker:
 browser_broker = BrowserBroker()
 
 
+class ManagerShutdownController:
+    def __init__(self, shutdown_callback: Any | None = None) -> None:
+        self._shutdown_callback = shutdown_callback or self._signal_process
+
+    def request(self) -> None:
+        threading.Timer(0.25, self._shutdown_callback).start()
+
+    @staticmethod
+    def _signal_process() -> None:
+        signal.raise_signal(signal.SIGINT)
+
+
+shutdown_controller = ManagerShutdownController()
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     try:
@@ -481,6 +497,7 @@ async def dashboard() -> str:
     #headset-start, #conversation-start { background: #c4b5fd; color: #2e1065; }
     #headset-stop, #conversation-pause { background: #fb7185; color: #500724; }
     #usb-start { background: #67e8f9; color: #164e63; } #usb-stop { background: #fb7185; color: #500724; }
+    #shutdown { background: #f8fafc; color: #450a0a; }
     select { min-width: 260px; padding: 8px; border-radius: 6px; }
     pre { min-height: 260px; max-height: 520px; overflow: auto; margin: 14px 0 0; padding: 14px; border-radius: 8px; background: #020617; color: #cbd5e1; white-space: pre-wrap; }
     .ok { color: #6ee7b7; } .idle { color: #fbbf24; } .error { color: #fda4af; }
@@ -520,6 +537,11 @@ async def dashboard() -> str:
   </section>
   <section><div class="row"><h2>ヘッドセット・テスト ログ</h2><button id="headset-log-copy">ログをコピー</button></div>
     <pre id="headset-logs" tabindex="0">読み込み中...</pre></section>
+    <section>
+        <h2>Manager</h2>
+        <p>管理中の Relay、USB ブリッジ、ヘッドセット・テストを停止して、この Manager を終了します。</p>
+        <button id="shutdown">Manager を終了</button><p id="shutdown-message" class="error"></p>
+    </section>
   <script>
     const state = document.querySelector('#state');
     const details = document.querySelector('#details');
@@ -650,6 +672,14 @@ async def dashboard() -> str:
       try { await request('/api/headset/conversation/pause', {method: 'POST'}); }
       catch (error) { headsetMessage.textContent = error.message; } finally { refreshHeadset(); }
     };
+        document.querySelector('#shutdown').onclick = async () => {
+            if (!confirm('Relay と Manager を終了しますか？')) return;
+            const target = document.querySelector('#shutdown-message');
+            try {
+                await request('/api/shutdown', {method: 'POST'});
+                target.className = 'ok'; target.textContent = 'Manager を終了しています。このタブは閉じられます。';
+            } catch (error) { target.className = 'error'; target.textContent = error.message; }
+        };
     refresh(); refreshUsb(); refreshHeadset(); loadAudioDevices();
     setInterval(() => { refresh(); refreshUsb(); refreshHeadset(); }, 2000);
   </script>
@@ -679,6 +709,15 @@ async def stop() -> dict[str, Any]:
         return supervisor.stop(reject_unmanaged=True)
     except LocalManagerError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/api/shutdown")
+async def shutdown() -> dict[str, str]:
+    headset_supervisor.stop()
+    usb_bridge_supervisor.stop()
+    supervisor.stop()
+    shutdown_controller.request()
+    return {"status": "shutting_down"}
 
 
 @app.get("/api/logs")

@@ -1,3 +1,4 @@
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -6,8 +7,10 @@ from local_manager import (
     BrowserBroker,
     HeadsetSupervisor,
     LocalManagerError,
+    ManagerShutdownController,
     RelaySupervisor,
     UsbBridgeSupervisor,
+    shutdown,
 )
 
 
@@ -85,3 +88,50 @@ def test_browser_broker_uses_interactive_explorer(monkeypatch: pytest.MonkeyPatc
 
     assert BrowserBroker.open("https://example.com/")
     assert launched == [["explorer.exe", "https://example.com/"]]
+
+
+def test_manager_shutdown_request_runs_callback_after_delay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requested: list[float] = []
+
+    class FakeTimer:
+        def __init__(self, delay: float, callback: object) -> None:
+            requested.append(delay)
+            self._callback = callback
+
+        def start(self) -> None:
+            self._callback()
+
+    monkeypatch.setattr("local_manager.threading.Timer", FakeTimer)
+    callbacks: list[str] = []
+
+    ManagerShutdownController(lambda: callbacks.append("shutdown")).request()
+
+    assert requested == [0.25]
+    assert callbacks == ["shutdown"]
+
+
+def test_shutdown_stops_managed_processes_before_requesting_exit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    class FakeSupervisor:
+        def __init__(self, name: str) -> None:
+            self._name = name
+
+        def stop(self) -> None:
+            calls.append(self._name)
+
+    class FakeShutdownController:
+        def request(self) -> None:
+            calls.append("manager")
+
+    monkeypatch.setattr("local_manager.headset_supervisor", FakeSupervisor("headset"))
+    monkeypatch.setattr("local_manager.usb_bridge_supervisor", FakeSupervisor("usb"))
+    monkeypatch.setattr("local_manager.supervisor", FakeSupervisor("relay"))
+    monkeypatch.setattr("local_manager.shutdown_controller", FakeShutdownController())
+
+    assert asyncio.run(shutdown()) == {"status": "shutting_down"}
+    assert calls == ["headset", "usb", "relay", "manager"]

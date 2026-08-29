@@ -11,16 +11,16 @@ namespace {
 constexpr uint32_t kKeepaliveIntervalMs = 10'000;
 }
 
-void RelayClient::begin_wifi() {
+void RelayClient::begin_wifi(const char* host, uint16_t port) {
   end();
   transport_ = RelayTransport::Wifi;
   String headers = String("Authorization: Bearer ") + DEVICE_TOKEN + "\r\n" +
                    "X-Device-Id: " + DEVICE_ID + "\r\n";
   ws_.setExtraHeaders(headers.c_str());
 #if RELAY_USE_TLS
-  ws_.beginSSL(RELAY_HOST, RELAY_PORT, RELAY_PATH);
+  ws_.beginSSL(host, port, RELAY_PATH);
 #else
-  ws_.begin(RELAY_HOST, RELAY_PORT, RELAY_PATH);
+  ws_.begin(host, port, RELAY_PATH);
 #endif
   ws_.setReconnectInterval(5000);
   // Send WebSocket protocol pings as well as the application keepalive below.

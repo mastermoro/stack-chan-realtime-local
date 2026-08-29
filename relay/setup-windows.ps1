@@ -2,6 +2,7 @@
 param(
     [switch]$WithHeadset,
     [switch]$WithoutFirmware,
+    [switch]$Force,
     [string]$PythonPath
 )
 
@@ -14,6 +15,8 @@ $envExamplePath = Join-Path $relayRoot ".env.example"
 $stackchanRoot = Join-Path (Split-Path -Parent $relayRoot) "stackchan"
 $secretsPath = Join-Path $stackchanRoot "include\secrets.hpp"
 $secretsExamplePath = Join-Path $stackchanRoot "include\secrets.example.hpp"
+$installStatePath = Join-Path $relayRoot ".venv\.stackchan-install.json"
+$pyprojectPath = Join-Path $relayRoot "pyproject.toml"
 
 if (-not $PythonPath) {
     $launcher = Get-Command py -ErrorAction SilentlyContinue
@@ -40,7 +43,8 @@ if ($LASTEXITCODE -ne 0) {
     throw "Python 3.11 or newer is required."
 }
 
-if (-not (Test-Path -LiteralPath $venvPython)) {
+$venvCreated = -not (Test-Path -LiteralPath $venvPython)
+if ($venvCreated) {
     Write-Host "Creating Python virtual environment..."
     & $PythonPath -m venv (Join-Path $relayRoot ".venv")
     if ($LASTEXITCODE -ne 0) {
@@ -56,20 +60,48 @@ if (-not $WithoutFirmware) {
     $extras += "firmware"
 }
 $installTarget = ".[" + ($extras -join ",") + "]"
-Write-Host "Installing Relay dependencies..."
+$installFingerprint = [ordered]@{
+    pyproject_sha256 = (Get-FileHash -LiteralPath $pyprojectPath -Algorithm SHA256).Hash
+    extras = @($extras | Sort-Object)
+}
+$dependenciesCurrent = $false
+if (-not $Force -and (Test-Path -LiteralPath $installStatePath)) {
+    try {
+        $previousState = Get-Content -LiteralPath $installStatePath -Raw | ConvertFrom-Json
+        $sameProject = $previousState.pyproject_sha256 -eq $installFingerprint.pyproject_sha256
+        $sameExtras = (@($previousState.extras) -join ",") -eq ($installFingerprint.extras -join ",")
+        if ($sameProject -and $sameExtras) {
+            & $venvPython -m pip check *> $null
+            $dependenciesCurrent = $LASTEXITCODE -eq 0
+        }
+    } catch {
+        $dependenciesCurrent = $false
+    }
+}
+
+if ($dependenciesCurrent) {
+    Write-Host "Relay dependencies are already current; skipping installation."
+} else {
+    Write-Host "Installing Relay dependencies..."
+}
 Push-Location $relayRoot
 try {
-    & $venvPython -m ensurepip --upgrade
-    if ($LASTEXITCODE -ne 0) {
-        throw "pip could not be prepared in relay/.venv (exit code $LASTEXITCODE)."
-    }
-    & $venvPython -m pip install --upgrade pip
-    if ($LASTEXITCODE -ne 0) {
-        throw "pip upgrade failed with exit code $LASTEXITCODE."
-    }
-    & $venvPython -m pip install -e $installTarget
-    if ($LASTEXITCODE -ne 0) {
-        throw "Relay dependency installation failed with exit code $LASTEXITCODE."
+    if (-not $dependenciesCurrent) {
+        if ($venvCreated) {
+            & $venvPython -m ensurepip --upgrade
+            if ($LASTEXITCODE -ne 0) {
+                throw "pip could not be prepared in relay/.venv (exit code $LASTEXITCODE)."
+            }
+            & $venvPython -m pip install --upgrade pip
+            if ($LASTEXITCODE -ne 0) {
+                throw "pip upgrade failed with exit code $LASTEXITCODE."
+            }
+        }
+        & $venvPython -m pip install -e $installTarget
+        if ($LASTEXITCODE -ne 0) {
+            throw "Relay dependency installation failed with exit code $LASTEXITCODE."
+        }
+        $installFingerprint | ConvertTo-Json | Set-Content -LiteralPath $installStatePath -Encoding UTF8
     }
 } finally {
     Pop-Location

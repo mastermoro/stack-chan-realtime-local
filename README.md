@@ -4,6 +4,8 @@
 
 Stack-chanから同じローカルネットワーク上のWindows PCへ接続し、そのPC上のRelayを経由してMicrosoft Foundry Realtime APIを利用する音声エージェントです。
 
+初めてセットアップする場合は、[Stack-chan 利用開始マニュアル](docs/how-to-start.md)に沿ってAzureリソースの準備、USB接続、設定、ファームウェア書き込みを進めてください。
+
 元の[`mastermoro/stack-chan-realtime`](https://github.com/mastermoro/stack-chan-realtime)をベースに、Relayの主な実行場所をAzure Container AppsからWindows PCへ移しました。Foundry Realtime、Responses APIのWeb検索、Stack-chanファームウェアは維持しています。
 
 ## 構成
@@ -49,6 +51,7 @@ Windows側のFunctionは明示的に登録したものだけ実行します。�
 - USB接続したStack-chanへのファームウェア書き込み
 
 Pythonが未導入の場合は、Windowsの`winget`を使ってPython 3.12をユーザー領域へ導入します。APIキーを使わずAzure CLI認証を使う場合、Azure CLI自体は任意項目としてGUIに状態が表示されます。
+2回目以降は、`pyproject.toml`とインストール項目に変更がなく依存関係が正常なら、パッケージの再インストールを省略します。強制的に更新する場合は`relay\setup-windows.ps1 -WithHeadset -Force`を実行します。Managerが既に動作している場合、「保存してManagerを起動」は二重起動せず既存の画面を開きます。
 
 コマンドラインでセットアップする場合は従来どおり次を実行できます。
 
@@ -61,6 +64,7 @@ notepad .env
 
 ブラウザで`http://127.0.0.1:8787`を開き、Relayを起動します。Manager UIはPC内だけに公開され、Stack-chan用RelayはLAN向けに`0.0.0.0:8080`で待ち受けます。
 Relayと同時にUSBブリッジも起動し、EspressifのUSB COMポートを自動検出します。
+終了するときはManager UI下部の「Managerを終了」を押します。管理中のRelay、USBブリッジ、ヘッドセット・テストを停止してからManager自体を終了します。
 
 `relay/.env`の最低限の設定:
 
@@ -127,7 +131,8 @@ Windows Defender Firewallの確認が表示された場合は、信頼するプ�
 
 ## USB / Wi-Fiモード
 
-Stack-chanのSettings（Volume調整）ページにある`AUTO`、`WI-FI`、`USB`で接続経路を選択できます。選択は本体へ保存され、再起動後も維持されます。
+Stack-chanの`NETWORK`タブにある`AUTO`、`WI-FI`、`USB`で接続経路を選択できます。選択は本体へ保存され、再起動後も維持されます。
+同じタブの`Relay endpoint`をタップすると、Wi-Fi接続先のIPv4アドレスとポートを変更できます。対象フィールドをタップして`-` / `+`で値を調整し、`SAVE`を押すと本体へ保存してWi-Fi接続を張り直します。
 
 - `AUTO`: 起動時にUSBを3秒待ち、利用できなければWi-Fiへ接続します。USB使用中はWi-FiとESP-NOWを停止し、USBが切れた時点でWi-Fiを起動します。Wi-Fiで会話中にUSBが見つかった場合は、応答終了後に切り替えます。
 - `WI-FI`: 従来のWi-Fi接続だけを使用し、USBへ自動退避しません。
