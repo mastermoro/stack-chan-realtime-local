@@ -92,3 +92,20 @@ When Web Search is used:
   ]
 }
 ```
+
+## USB bridge envelope
+
+USB mode carries the same JSON text and PCM binary messages through the PC bridge. Each serial packet is COBS encoded and surrounded by zero delimiters. A leading delimiter discards boot/framework log bytes before a frame. The decoded little-endian layout is:
+
+```text
+uint8  envelope_version = 1
+uint8  frame_type
+uint16 sequence
+uint32 payload_length
+byte   payload[payload_length]   // maximum 8192 bytes
+uint32 crc32                     // header + payload
+```
+
+Frame types are `HOST_PROBE=0x01`, `DEVICE_STATUS=0x02`, `DEVICE_OPEN=0x03`, `HOST_OPEN_ACK=0x04`, `DEVICE_CLOSE=0x05`, `HOST_CLOSE=0x06`, `DEVICE_TEXT=0x10`, `DEVICE_BINARY=0x11`, `HOST_TEXT=0x20`, `HOST_BINARY=0x21`, `DEVICE_LOG=0x30`, and `ERROR=0x7f`.
+
+The host sends `HOST_PROBE` every 500 ms. The device replies with `DEVICE_STATUS` containing `{"protocol":1,"device_id":"..."}` whether or not USB is the selected Relay route. To open USB as the route, the device sends `DEVICE_OPEN` with its device ID and token; the bridge then opens the authenticated local WebSocket and returns `HOST_OPEN_ACK`. Thereafter `*_TEXT` and `*_BINARY` preserve the WebSocket message types. Sequence gaps and CRC failures are diagnostic counters; a damaged packet is discarded without terminating the stream.

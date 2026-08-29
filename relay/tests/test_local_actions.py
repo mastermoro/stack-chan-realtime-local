@@ -1,4 +1,5 @@
 import asyncio
+import json
 
 import pytest
 
@@ -65,3 +66,75 @@ def test_browser_tool_rejects_url_credentials() -> None:
                 {"url": "https://user:password@example.com/"},
             )
         )
+
+
+def test_windows_browser_url_is_handed_to_manager(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("app.tools.local_actions.os.name", "nt")
+    requests: list[tuple[str, str, str, dict[str, str]]] = []
+
+    class FakeResponse:
+        status = 200
+
+        @staticmethod
+        def read() -> bytes:
+            return b""
+
+    class FakeConnection:
+        def __init__(self, host: str, port: int, timeout: float) -> None:
+            assert (host, port, timeout) == ("127.0.0.1", 8787, 6)
+
+        def request(
+            self, method: str, path: str, body: str, headers: dict[str, str]
+        ) -> None:
+            requests.append((method, path, body, headers))
+
+        @staticmethod
+        def getresponse() -> FakeResponse:
+            return FakeResponse()
+
+        @staticmethod
+        def close() -> None:
+            pass
+
+    monkeypatch.setattr("app.tools.local_actions.HTTPConnection", FakeConnection)
+
+    assert LocalActionExecutor._open_browser("https://example.com/")
+    assert requests == [
+        (
+            "POST",
+            "/api/browser/open",
+            json.dumps({"url": "https://example.com/"}),
+            {"Content-Type": "application/json"},
+        )
+    ]
+
+
+def test_windows_browser_broker_failure_is_reported(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("app.tools.local_actions.os.name", "nt")
+
+    class FakeResponse:
+        status = 400
+
+        @staticmethod
+        def read() -> bytes:
+            return b""
+
+    class FakeConnection:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        @staticmethod
+        def request(*_args: object, **_kwargs: object) -> None:
+            pass
+
+        @staticmethod
+        def getresponse() -> FakeResponse:
+            return FakeResponse()
+
+        @staticmethod
+        def close() -> None:
+            pass
+
+    monkeypatch.setattr("app.tools.local_actions.HTTPConnection", FakeConnection)
+
+    assert not LocalActionExecutor._open_browser("https://example.com/")

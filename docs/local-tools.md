@@ -23,10 +23,12 @@ The registered function is:
 }
 ```
 
-The Relay validates the URL and launches the Windows default browser through
-Python's `webbrowser` module. Only HTTP and HTTPS are accepted. URLs containing
-credentials are rejected. When an allow-list is configured, exact domains and
-their subdomains are accepted.
+The Relay validates the URL and sends it to the loopback-only Local Manager.
+The Manager repeats the same validation, then hands the URL to the interactive
+Windows Explorer session so it opens in the user's default browser and profile.
+Both the Manager and Relay must be running. Only HTTP and HTTPS are accepted.
+URLs containing credentials are rejected. When an allow-list is configured,
+exact domains and their subdomains are accepted.
 
 ## Adding another local action
 

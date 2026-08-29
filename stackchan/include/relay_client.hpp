@@ -6,8 +6,11 @@
 #include <functional>
 
 #include "protocol.hpp"
+#include "usb_transport.hpp"
 
 namespace stackchan {
+enum class RelayTransport : uint8_t { None, Wifi, Usb };
+
 class RelayClient {
  public:
   using AudioHandler = std::function<void(const uint8_t*, size_t)>;
@@ -17,9 +20,13 @@ class RelayClient {
   using SessionReconnectedHandler = std::function<void()>;
   using EmotionHandler = std::function<void(const char*)>;
 
-  void begin();
+  void begin_wifi();
+  void begin_usb();
+  void end();
   void loop();
   bool connected() const { return connected_; }
+  bool usb_host_available() const { return usb_.host_available(); }
+  RelayTransport transport() const { return transport_; }
   void send_audio(const int16_t* samples, size_t sample_count);
   void send_control(const char* type);
   void send_ui_mode(const char* mode);
@@ -34,13 +41,20 @@ class RelayClient {
 
  private:
   void handle_event(WStype_t type, uint8_t* payload, size_t length);
+  void handle_usb_frame(UsbFrameType type, const uint8_t* payload, size_t length);
+  void handle_text(const uint8_t* payload, size_t length);
+  void send_usb_open();
+  bool send_text(const String& text);
   void send_hello();
   void send_notice(const char* title, const char* detail);
   static AgentState parse_state(const char* value);
 
   WebSocketsClient ws_;
+  UsbTransport usb_;
+  RelayTransport transport_ = RelayTransport::None;
   bool connected_ = false;
   uint32_t last_keepalive_ms_ = 0;
+  uint32_t last_usb_open_ms_ = 0;
   AudioHandler audio_handler_;
   StateHandler state_handler_;
   NoticeHandler notice_handler_;
