@@ -14,17 +14,17 @@ bool M5AudioHal::begin() {
   M5.Speaker.end();
   M5.Mic.begin();
   capture_enabled_ = true;
-  return M5.Mic.isEnabled();
+  return M5.Mic.isRunning();
 }
 
 size_t M5AudioHal::capture(int16_t* dst, size_t samples) {
-  if (!capture_enabled_ || !M5.Mic.isEnabled()) return 0;
+  if (!capture_enabled_ || !M5.Mic.isRunning()) return 0;
   if (!M5.Mic.record(dst, samples, kSampleRate)) return 0;
   return samples;
 }
 
 void M5AudioHal::play(const int16_t* samples, size_t sample_count) {
-  if (!M5.Speaker.isEnabled() || sample_count == 0) return;
+  if (!M5.Speaker.isRunning() || sample_count == 0) return;
 
   // M5Unified plays raw audio asynchronously and does not own the input
   // buffer. Retain three rotating buffers as recommended by M5Unified.
@@ -42,8 +42,8 @@ void M5AudioHal::play(const int16_t* samples, size_t sample_count) {
 void M5AudioHal::loop() {
   const uint32_t now = millis();
   if (capture_enabled_) {
-    if (M5.Mic.isEnabled() || M5.Speaker.isPlaying()) return;
-    if (M5.Speaker.isEnabled()) {
+    if (M5.Mic.isRunning() || M5.Speaker.isPlaying()) return;
+    if (M5.Speaker.isRunning()) {
       M5.Speaker.end();
       audio_start_after_ms_ = now + kAudioEndpointSwitchDelayMs;
       return;
@@ -52,8 +52,8 @@ void M5AudioHal::loop() {
     M5.Mic.begin();
     audio_start_after_ms_ = now + kAudioEndpointRetryDelayMs;
   } else {
-    if (M5.Speaker.isEnabled() || M5.Mic.isRecording()) return;
-    if (M5.Mic.isEnabled()) {
+    if (M5.Speaker.isRunning() || M5.Mic.isRecording()) return;
+    if (M5.Mic.isRunning()) {
       M5.Mic.end();
       audio_start_after_ms_ = now + kAudioEndpointSwitchDelayMs;
       return;
