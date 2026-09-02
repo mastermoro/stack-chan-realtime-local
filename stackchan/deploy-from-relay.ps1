@@ -247,20 +247,21 @@ if (-not $SkipRelayCheck) {
     }
 }
 
-$pio = Get-Command pio -ErrorAction SilentlyContinue
-if (-not $pio) {
+$pioCommand = Get-Command pio -ErrorAction SilentlyContinue
+$pioPath = if ($pioCommand) { $pioCommand.Source } else { $null }
+if (-not $pioPath) {
     $bundledPio = Join-Path (Split-Path -Parent $stackchanRoot) "relay\.venv\Scripts\pio.exe"
     if (Test-Path -LiteralPath $bundledPio) {
-        $pio = Get-Item -LiteralPath $bundledPio
+        $pioPath = $bundledPio
     }
 }
-if (-not $pio) {
+if (-not $pioPath) {
     throw "PlatformIO command 'pio' was not found. Run setup.cmd to install it."
 }
 
 Push-Location $stackchanRoot
 try {
-    & $pio.Source run
+    & $pioPath run
     if ($LASTEXITCODE -ne 0) {
         throw "PlatformIO build failed with exit code $LASTEXITCODE."
     }
@@ -268,7 +269,10 @@ try {
     if (-not $BuildOnly) {
         $managerUrl = "http://127.0.0.1:8787"
         $usbBridgeWasRunning = $false
+        $managedRelayWasRunning = $false
         try {
+            $relayStatus = Invoke-RestMethod -Uri "$managerUrl/api/status" -TimeoutSec 2
+            $managedRelayWasRunning = [bool]$relayStatus.running -and [bool]$relayStatus.managed
             $usbStatus = Invoke-RestMethod -Uri "$managerUrl/api/usb/status" -TimeoutSec 2
             $usbBridgeWasRunning = [bool]$usbStatus.running
             if ($usbBridgeWasRunning) {
@@ -284,9 +288,18 @@ try {
             $uploadArguments += @("--upload-port", $UploadPort)
         }
         try {
-            & $pio.Source @uploadArguments
+            & $pioPath @uploadArguments
             if ($LASTEXITCODE -ne 0) {
                 throw "PlatformIO upload failed with exit code $LASTEXITCODE."
+            }
+            if ($managedRelayWasRunning) {
+                $null = Invoke-RestMethod -Method Post -Uri "$managerUrl/api/stop" -TimeoutSec 8
+                $null = Invoke-RestMethod -Method Post -Uri "$managerUrl/api/start" -TimeoutSec 8
+                if (-not $usbBridgeWasRunning) {
+                    $null = Invoke-RestMethod -Method Post -Uri "$managerUrl/api/usb/stop" -TimeoutSec 5
+                }
+                $usbBridgeWasRunning = $false
+                Write-Host "Relay restarted to load the saved device credentials."
             }
             Write-Host "Stack-chan deployment completed."
         } finally {

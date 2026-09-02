@@ -11,6 +11,7 @@ __pycache__/
 !**/.env.example
 
 # PlatformIO
+.platformio/
 stackchan/.pio/
 stackchan/.vscode/
 stackchan/include/secrets*.hpp
