@@ -1403,6 +1403,14 @@ void handle_touch() {
     handle_state(AgentState::Ready);
   } else if (state == AgentState::Thinking || state == AgentState::Searching ||
              state == AgentState::Speaking) {
+    if (ui_page == UiPage::Face) {
+      audio.stop_playback();
+      conversation_active = true;
+      resume_after_response = false;
+      relay.send_control("conversation.pause");
+      start_listening();
+      return;
+    }
     conversation_active = false;
     resume_after_response = false;
     detail = "Conversation ended";
