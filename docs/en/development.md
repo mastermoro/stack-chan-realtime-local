@@ -146,8 +146,8 @@ required after every response:
 
 - `READY`: tap the display to start a conversation and microphone streaming.
 - `LISTENING`: tap to end the conversation and stop microphone streaming.
-- `THINKING`, `SEARCHING`, or `SPEAKING`: tap to cancel the response and end the
-  conversation.
+- `THINKING`, `SEARCHING`, or `SPEAKING`: tap to cancel the current response and
+  playback, then return to `LISTENING`.
 
 The upper-left 64×64px area of the Face screen is reserved for the camera
 wipe. Tap it to show the CoreS3 camera picture-in-picture and start face
