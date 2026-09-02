@@ -8,6 +8,7 @@ from app.usb.bridge import (
     PCM16_MONO_BYTES_PER_SECOND,
     USB_AUDIO_FRAME_BYTES,
     USB_AUDIO_LEAD_SECONDS,
+    USB_SERIAL_WRITE_CHUNK_BYTES,
     BridgeMetrics,
     BridgeStatus,
     SerialWorker,
@@ -86,6 +87,21 @@ def test_decode_rejects_unknown_frame_type() -> None:
 def test_serial_worker_distinguishes_logs_from_binary_corruption() -> None:
     assert SerialWorker._looks_like_log(b"Wi-Fi status: connected\n")
     assert not SerialWorker._looks_like_log(b"\x03\xff\x81\x00\x12\x93")
+
+
+def test_serial_worker_splits_large_writes_into_timeout_safe_chunks() -> None:
+    writes: list[bytes] = []
+
+    class FakePort:
+        def write(self, data: bytes) -> int:
+            writes.append(data)
+            return len(data)
+
+    wire = bytes(range(256)) * 20
+
+    assert SerialWorker._write_wire(FakePort(), wire)  # type: ignore[arg-type]
+    assert b"".join(writes) == wire
+    assert max(map(len, writes)) <= USB_SERIAL_WRITE_CHUNK_BYTES
 
 
 def test_usb_audio_frame_is_twenty_milliseconds_of_pcm16() -> None:

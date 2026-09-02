@@ -31,6 +31,7 @@ PROBE_INTERVAL_SECONDS = 0.5
 DEVICE_DISCOVERY_TIMEOUT_SECONDS = 12.0
 PCM16_MONO_BYTES_PER_SECOND = 24_000 * 2
 USB_AUDIO_FRAME_BYTES = 960  # 20 ms at 24 kHz PCM16 mono
+USB_SERIAL_WRITE_CHUNK_BYTES = 1024
 # Keep 100 ms queued ahead of playback. This is only about 4.8 KiB of PCM,
 # safely below the device's 16 KiB HWCDC RX buffer, and absorbs ordinary
 # Windows scheduler jitter without the previous 8 KiB unpaced bursts.
@@ -175,13 +176,9 @@ class SerialWorker:
                             wire = self._outgoing.get_nowait()
                         except queue.Empty:
                             break
-                        offset = 0
-                        while offset < len(wire):
-                            written = port.write(wire[offset:])
-                            if written <= 0:
-                                self._emit(SerialEvent("error", "serial write made no progress"))
-                                return
-                            offset += written
+                        if not self._write_wire(port, wire):
+                            self._emit(SerialEvent("error", "serial write made no progress"))
+                            return
 
                     incoming = port.read(max(port.in_waiting, 1))
                     if not incoming:
@@ -200,6 +197,17 @@ class SerialWorker:
             self._emit(SerialEvent("error", str(exc)))
         finally:
             self._emit(SerialEvent("closed", self.port_name))
+
+    @staticmethod
+    def _write_wire(port: serial.Serial, wire: bytes) -> bool:
+        offset = 0
+        while offset < len(wire):
+            end = min(offset + USB_SERIAL_WRITE_CHUNK_BYTES, len(wire))
+            written = port.write(wire[offset:end])
+            if written <= 0:
+                return False
+            offset += written
+        return True
 
     @staticmethod
     def _looks_like_log(data: bytes) -> bool:
