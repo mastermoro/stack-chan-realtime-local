@@ -24,5 +24,6 @@ class M5AudioHal final : public AudioHal {
   size_t playback_buffer_index_ = 0;
   uint8_t volume_ = 128;
   bool capture_enabled_ = true;
+  uint32_t audio_start_after_ms_ = 0;
 };
 }  // namespace stackchan
