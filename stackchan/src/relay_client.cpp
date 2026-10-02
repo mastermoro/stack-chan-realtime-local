@@ -102,9 +102,23 @@ void RelayClient::send_control(const char* type) {
   if (!connected_) return;
   JsonDocument doc;
   doc["type"] = type;
+  const bool interrupt = !strcmp(type, "conversation.pause") || !strcmp(type, "response.cancel");
+  if (interrupt) {
+    // Close the local gate before sending. Face mode immediately starts
+    // capturing again, but old response frames can still be queued on either
+    // transport. Only Relay's ordered, matching acknowledgement releases them.
+    pending_interrupt_id_ = ++last_interrupt_id_;
+    if (pending_interrupt_id_ == 0) pending_interrupt_id_ = ++last_interrupt_id_;
+    doc["interrupt_id"] = pending_interrupt_id_;
+  }
   String json;
   serializeJson(doc, json);
-  send_text(json);
+  if (!send_text(json) && interrupt) {
+    // Never reopen the gate on a failed send: the remote response may still
+    // be streaming. A reconnect or a subsequent acknowledged pause recovers.
+    if (state_handler_) state_handler_(AgentState::Error);
+    send_notice("CONNECTION ERROR", "Could not interrupt Relay; reconnect to recover");
+  }
 }
 
 void RelayClient::send_ui_mode(const char* mode) {
@@ -160,6 +174,7 @@ void RelayClient::handle_event(WStype_t type, uint8_t* payload, size_t length) {
   if (transport_ != RelayTransport::Wifi) return;
   switch (type) {
     case WStype_CONNECTED:
+      if (!connected_) pending_interrupt_id_ = 0;
       connected_ = true;
       last_keepalive_ms_ = millis();
       Serial.println("Relay WebSocket connected");
@@ -185,7 +200,9 @@ void RelayClient::handle_event(WStype_t type, uint8_t* payload, size_t length) {
       if (state_handler_) state_handler_(AgentState::Error);
       break;
     case WStype_BIN:
-      if (audio_handler_) audio_handler_(payload, length);
+      if (connected_ && pending_interrupt_id_ == 0 && audio_handler_) {
+        audio_handler_(payload, length);
+      }
       break;
     case WStype_TEXT: {
       handle_text(payload, length);
@@ -210,6 +227,10 @@ void RelayClient::handle_usb_frame(UsbFrameType type, const uint8_t* payload, si
   if (transport_ != RelayTransport::Usb) return;
   switch (type) {
     case UsbFrameType::HostOpenAck:
+      // DeviceOpen retries can leave duplicate acks buffered. They neither
+      // start a new session nor release an in-flight interruption fence.
+      if (connected_) break;
+      pending_interrupt_id_ = 0;
       connected_ = true;
       last_keepalive_ms_ = millis();
       send_notice("USB CONNECTED", "Authenticating with Relay");
@@ -224,7 +245,9 @@ void RelayClient::handle_usb_frame(UsbFrameType type, const uint8_t* payload, si
       handle_text(payload, length);
       break;
     case UsbFrameType::HostBinary:
-      if (audio_handler_) audio_handler_(payload, length);
+      if (connected_ && pending_interrupt_id_ == 0 && audio_handler_) {
+        audio_handler_(payload, length);
+      }
       break;
     default:
       break;
@@ -237,6 +260,22 @@ void RelayClient::handle_text(const uint8_t* payload, size_t length) {
   JsonDocument doc;
   if (deserializeJson(doc, payload, length)) return;
   const char* message_type = doc["type"] | "";
+  if (!strcmp(message_type, "conversation.paused")) {
+    if (pending_interrupt_id_ != 0 && doc["interrupt_id"].is<uint32_t>() &&
+        doc["interrupt_id"].as<uint32_t>() == pending_interrupt_id_) {
+      pending_interrupt_id_ = 0;
+    }
+    return;
+  }
+  if (pending_interrupt_id_ != 0 && strcmp(message_type, "error")) {
+    // Suppress response state, PCM (in both transport callbacks), completion,
+    // emotion and notices. A stale Speaking or Ready must not disable the
+    // microphone or change the Face UI while waiting for the fence. Session
+    // notifications are not acknowledgements: they too may already be queued.
+    if (strcmp(message_type, "state") || parse_state(doc["state"] | "") != AgentState::Error) {
+      return;
+    }
+  }
   if (!strcmp(message_type, "state") && state_handler_) {
     state_handler_(parse_state(doc["state"] | ""));
   } else if (!strcmp(message_type, "session.ready")) {

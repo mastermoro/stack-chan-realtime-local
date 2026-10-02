@@ -1464,14 +1464,16 @@ void setup() {
 
 void loop() {
   M5StackChan.update();
+  // React to the sampled touch before dispatching another batch of response
+  // audio. UsbTransport also yields bounded receive work under a busy stream.
+  handle_top_touch();
+  handle_touch();
   relay.loop();
   manage_connection();
   static bool relay_was_connected = false;
   if (relay.connected() && !relay_was_connected) sync_ui_mode();
   relay_was_connected = relay.connected();
   audio.loop();
-  handle_top_touch();
-  handle_touch();
   apply_espnow_remote();
   update_idle_behavior();
 

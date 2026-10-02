@@ -11,6 +11,12 @@ constexpr size_t kMaxPayload = 8192;
 constexpr size_t kMaxRawFrame = kHeaderSize + kMaxPayload + kCrcSize;
 constexpr size_t kMaxEncodedFrame = kMaxRawFrame + kMaxRawFrame / 254 + 3;
 constexpr uint32_t kHostPresenceMs = 1500;
+// Audio can arrive continuously, so draining Serial.available() to zero may
+// never return to the touch handlers. Bound each pass, including short packet
+// callbacks, and leave incomplete COBS frames buffered for the next pass.
+constexpr size_t kReceiveByteBudget = 2048;
+constexpr size_t kReceivePacketBudget = 4;
+constexpr uint32_t kReceiveTimeBudgetUs = 2000;
 
 uint32_t crc32(const uint8_t* data, size_t length) {
   uint32_t crc = 0xffffffffU;
@@ -93,11 +99,20 @@ void UsbTransport::begin() {
 }
 
 void UsbTransport::loop() {
-  while (Serial.available() > 0) {
+  const uint32_t started_us = micros();
+  size_t bytes_read = 0;
+  size_t packets_read = 0;
+  while (bytes_read < kReceiveByteBudget && packets_read < kReceivePacketBudget &&
+         static_cast<uint32_t>(micros() - started_us) < kReceiveTimeBudgetUs &&
+         Serial.available() > 0) {
     const int value = Serial.read();
     if (value < 0) break;
+    ++bytes_read;
     if (value == 0) {
-      if (!encoded_input_.empty()) consume_packet();
+      if (!encoded_input_.empty()) {
+        consume_packet();
+        ++packets_read;
+      }
       encoded_input_.clear();
     } else if (encoded_input_.size() < kMaxEncodedFrame) {
       encoded_input_.push_back(static_cast<uint8_t>(value));

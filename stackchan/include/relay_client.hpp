@@ -55,6 +55,10 @@ class RelayClient {
   bool connected_ = false;
   uint32_t last_keepalive_ms_ = 0;
   uint32_t last_usb_open_ms_ = 0;
+  // IDs survive reconnects so a delayed acknowledgement cannot release a
+  // newer interrupt. Zero means there is no outstanding output fence.
+  uint32_t last_interrupt_id_ = 0;
+  uint32_t pending_interrupt_id_ = 0;
   AudioHandler audio_handler_;
   StateHandler state_handler_;
   NoticeHandler notice_handler_;

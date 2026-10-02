@@ -128,3 +128,124 @@ def test_status_writer_failure_does_not_stop_bridge(tmp_path) -> None:
     unwritable_status_path.mkdir()
 
     StatusWriter(unwritable_status_path).write(BridgeStatus(), BridgeMetrics())
+
+
+@pytest.mark.asyncio
+async def test_bridge_interrupt_discards_paced_and_buffered_output_until_matching_fence():
+    import asyncio
+
+    from app.usb.bridge import UsbBridge
+
+    class FakeRelay:
+        def __init__(self):
+            self.incoming = asyncio.Queue()
+            self.sent = []
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            return await self.incoming.get()
+
+        async def send(self, message):
+            self.sent.append(message)
+
+    class FakeWorker:
+        def __init__(self):
+            self.frames = []
+            self.audio_started = asyncio.Event()
+            self.new_audio = asyncio.Event()
+
+        def send(self, frame_type, payload=b""):
+            self.frames.append((frame_type, payload))
+            if frame_type == UsbFrameType.HOST_BINARY:
+                self.audio_started.set()
+                if payload == b"new audio":
+                    self.new_audio.set()
+            return True
+
+    relay = FakeRelay()
+    worker = FakeWorker()
+    bridge = UsbBridge("ws://unused")
+    bridge._relay = relay
+    bridge._worker = worker
+    reader = asyncio.create_task(bridge._read_relay())
+    try:
+        # More than the USB lead: cancellation occurs while this frame is paced.
+        await relay.incoming.put(b"a" * 8192)
+        await asyncio.wait_for(worker.audio_started.wait(), timeout=1)
+        before_cancel = len(worker.frames)
+        for interrupt_id in (1, 2):
+            await bridge._handle_frame(UsbFrame(
+                UsbFrameType.DEVICE_TEXT, interrupt_id,
+                json.dumps({"type": "conversation.pause", "interrupt_id": interrupt_id}).encode(),
+            ))
+        for message in (
+            json.dumps({"type": "state", "state": "speaking"}),
+            b"old buffered audio",
+            json.dumps({"type": "conversation.paused", "interrupt_id": 1}),
+            b"old after superseded acknowledgment",
+            json.dumps({"type": "conversation.paused", "interrupt_id": 2}),
+            json.dumps({"type": "state", "state": "speaking"}),
+            b"new audio",
+        ):
+            await relay.incoming.put(message)
+        await asyncio.wait_for(worker.new_audio.wait(), timeout=1)
+        forwarded = worker.frames[before_cancel:]
+        assert [payload for kind, payload in forwarded if kind == UsbFrameType.HOST_BINARY] == [
+            b"new audio"
+        ]
+        texts = [json.loads(payload) for kind, payload in forwarded
+                 if kind == UsbFrameType.HOST_TEXT]
+        assert texts == [
+            {"type": "conversation.paused", "interrupt_id": 2},
+            {"type": "state", "state": "speaking"},
+        ]
+        assert [json.loads(message)["interrupt_id"] for message in relay.sent] == [1, 2]
+    finally:
+        reader.cancel()
+        await asyncio.gather(reader, return_exceptions=True)
+
+
+@pytest.mark.parametrize("interrupt_id", [None, True, False, 0, -1, 2**32, "1", 1.5])
+def test_bridge_ignores_invalid_interrupt_ids(interrupt_id):
+    from app.usb.bridge import UsbBridge
+
+    bridge = UsbBridge("ws://unused")
+    bridge._observe_device_control(json.dumps({
+        "type": "conversation.pause", "interrupt_id": interrupt_id,
+    }))
+    assert bridge._pending_interrupt is None
+    assert not bridge._interrupt.is_set()
+
+
+def test_bridge_fence_requires_exact_ack_not_state_timer_or_reconnect_notice():
+    from app.usb.bridge import UsbBridge
+
+    bridge = UsbBridge("ws://unused")
+    bridge._observe_device_control('{"type":"response.cancel","interrupt_id":1}')
+    for payload in (
+        {"type": "state", "state": "speaking"},
+        {"type": "response.done"},
+        {"type": "session.reconnected"},
+        {"type": "session.ready"},
+        {"type": "conversation.paused", "interrupt_id": True},
+        {"type": "conversation.paused", "interrupt_id": "1"},
+        {"type": "conversation.paused", "interrupt_id": 2},
+    ):
+        assert not bridge._forward_relay_control(json.dumps(payload))
+        assert bridge._pending_interrupt == 1
+    assert bridge._forward_relay_control('{"type":"error","code":"UPSTREAM_RECONNECTING"}')
+    assert bridge._pending_interrupt == 1
+    assert bridge._forward_relay_control('{"type":"conversation.paused","interrupt_id":1}')
+    assert bridge._pending_interrupt is None
+    assert not bridge._interrupt.is_set()
+    assert bridge._forward_relay_control('{"type":"state","state":"speaking"}')
+
+
+def test_bridge_legacy_client_without_interrupt_id_keeps_forwarding():
+    from app.usb.bridge import UsbBridge
+
+    bridge = UsbBridge("ws://unused")
+    bridge._observe_device_control('{"type":"conversation.pause"}')
+    assert bridge._forward_relay_control('{"type":"state","state":"ready"}')
