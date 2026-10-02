@@ -98,3 +98,40 @@ uint32 crc32                     // header + payload
 フレームタイプは `HOST_PROBE=0x01`、`DEVICE_STATUS=0x02`、`DEVICE_OPEN=0x03`、`HOST_OPEN_ACK=0x04`、`DEVICE_CLOSE=0x05`、`HOST_CLOSE=0x06`、`DEVICE_TEXT=0x10`、`DEVICE_BINARY=0x11`、`HOST_TEXT=0x20`、`HOST_BINARY=0x21`、`DEVICE_LOG=0x30`、`ERROR=0x7f` である。
 
 ホストは 500 ms ごとに `HOST_PROBE` を送信する。USB が選択中の Relay ルートかどうかにかかわらず、デバイスは `{"protocol":1,"device_id":"..."}` を含む `DEVICE_STATUS` で応答する。USB をルートとして開くには、デバイスがデバイス ID とトークンを含む `DEVICE_OPEN` を送信する。続いてブリッジが認証済みのローカル WebSocket を開き、`HOST_OPEN_ACK` を返す。それ以降、`*_TEXT` と `*_BINARY` は WebSocket のメッセージ種別を維持する。シーケンス欠落と CRC エラーは診断カウンターに記録し、破損したパケットはストリームを終了せずに破棄する。
+
+## 再生割り込みのフェンス（issue #12）
+
+新しいファームウェアは `conversation.pause` / `response.cancel` に、端末で増加させる
+`interrupt_id`（1〜4294967295 の整数）を付ける。端末は送信より先に再生を停止し、
+後続の応答状態・PCM・完了通知を遮断する。Face ではマイクを直ちに再開できる。
+
+```json
+{"type":"conversation.pause","interrupt_id":42}
+{"type":"conversation.paused","interrupt_id":42}
+```
+
+Relay は割り込み前の送信処理が終了した後、同じ順序付きストリームで
+`conversation.paused` を返す。その応答の古い PCM / 状態をフェンス後に送らない。
+USB ブリッジも割り込みを受信すると PCM のペーシング待ちを解除し、フェンスまでの
+滞留データを破棄する。端末とブリッジは最新 ID と一致した確認だけで遮断を解除する。
+古い確認、`speaking`、経過時間、滞留した `session.reconnected` は解除条件ではない。
+実際にトランスポートを張り直した場合はローカルフェンスをリセットする。
+
+ID なしの既存クライアントも使用できる。新ファームウェアは対応 Relay と一緒に更新すること。
+古い Relay は確認を返さないため、出力を遮断して確認期限で接続を作り直す。
+復旧時は新しい bridge も必要であり、旧構成に黙って戻して再生を許可しない。
+通常は Relay / USB ブリッジを先に更新し、その後ファームウェアを更新する。
+
+上流のキャンセルエラーに client event_id がなく、キャンセルが保留中の場合は、古い
+応答との識別ができないため Foundry セッションを再接続する。この例外的な復旧では
+会話コンテキストがリセットされるが、出力の誤再開や永続的なミュートを避ける。
+
+確認が5秒届かない場合、端末はトランスポートを切断して新しい接続を要求する。
+タイマー自体はフェンスを解除しない。USB の復旧時は DeviceOpen に正の uint32
+`recovery_id` を付け、bridge は旧 WebSocket を閉じて新しい WebSocket を開いた後だけ、
+同じ ID を JSON の HostOpenAck ペイロードへ返す。端末は復旧中に空・不一致・不正型の
+OpenAck を受け付けない。通常の ID なし DeviceOpen / 空 HostOpenAck は既存互換を維持する。
+制御フレームの送信キュー投入に失敗した bridge は Relay 接続を閉じる。
+
+USB で確認待ちのまま HostClose を受けた場合も recovery_id による新規ハンドシェイクを
+要求する。滞留した HostClose / 空 HostOpenAck の組だけではフェンスを解除しない。

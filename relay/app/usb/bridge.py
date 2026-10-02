@@ -32,6 +32,8 @@ DEVICE_DISCOVERY_TIMEOUT_SECONDS = 12.0
 PCM16_MONO_BYTES_PER_SECOND = 24_000 * 2
 USB_AUDIO_FRAME_BYTES = 960  # 20 ms at 24 kHz PCM16 mono
 USB_SERIAL_WRITE_CHUNK_BYTES = 1024
+# Service device controls even when a slow serial writer never drains TX.
+USB_SERIAL_TX_BATCH_FRAMES = 4
 # Keep 100 ms queued ahead of playback. This is only about 4.8 KiB of PCM,
 # safely below the device's 16 KiB HWCDC RX buffer, and absorbs ordinary
 # Windows scheduler jitter without the previous 8 KiB unpaced bursts.
@@ -46,6 +48,7 @@ class BridgeMetrics:
     sequence_gaps: int = 0
     raw_log_bytes: int = 0
     reconnects: int = 0
+    interrupted_audio_bytes: int = 0
 
 
 @dataclass(slots=True)
@@ -171,7 +174,9 @@ class SerialWorker:
                         self.send(UsbFrameType.HOST_PROBE)
                         next_probe = now + PROBE_INTERVAL_SECONDS
 
-                    while True:
+                    for _ in range(USB_SERIAL_TX_BATCH_FRAMES):
+                        if self._stop.is_set():
+                            break
                         try:
                             wire = self._outgoing.get_nowait()
                         except queue.Empty:
@@ -228,6 +233,8 @@ class UsbBridge:
         self._worker: SerialWorker | None = None
         self._device_id: str | None = None
         self._expected_device_sequence: int | None = None
+        self._pending_interrupt: int | None = None
+        self._interrupt = asyncio.Event()
 
     async def run(self) -> None:
         self._write_status()
@@ -337,6 +344,7 @@ class UsbBridge:
                 message: str | bytes
                 if frame.frame_type == UsbFrameType.DEVICE_TEXT:
                     message = frame.payload.decode("utf-8")
+                    self._observe_device_control(message)
                 else:
                     message = frame.payload
                 await self._relay.send(message)
@@ -344,11 +352,66 @@ class UsbBridge:
                 logger.warning("device-to-relay forwarding failed: %s", exc)
                 await self._close_relay(send_close=True)
 
+    def _observe_device_control(self, message: str) -> None:
+        try:
+            payload = json.loads(message)
+        except (ValueError, TypeError):
+            return
+        if not isinstance(payload, dict):
+            return
+        interrupt_id = payload.get("interrupt_id")
+        if (
+            payload.get("type") in {"conversation.pause", "response.cancel"}
+            and type(interrupt_id) is int
+            and 0 < interrupt_id <= 0xFFFFFFFF
+        ):
+            self._pending_interrupt = interrupt_id
+            self._interrupt.set()  # Wake a paced frame without waiting out its audio.
+            logger.info("USB output interrupted id=%s", interrupt_id)
+
+    def _forward_relay_control(self, message: str) -> bool:
+        """Enqueue allowed control, releasing a fence only after successful enqueue."""
+        matching_fence = False
+        if self._pending_interrupt is not None:
+            try:
+                payload = json.loads(message)
+            except (ValueError, TypeError):
+                return False
+            if not isinstance(payload, dict):
+                return False
+            message_type = payload.get("type")
+            matching_fence = (
+                message_type == "conversation.paused"
+                and type(payload.get("interrupt_id")) is int
+                and payload["interrupt_id"] == self._pending_interrupt
+            )
+            # Still surface connection/errors while dropping stale output controls.
+            if not matching_fence and message_type not in {"error", "pong", "hello.ack"}:
+                return False
+        payload_bytes = message.encode("utf-8")
+        if len(payload_bytes) > MAX_PAYLOAD_BYTES:
+            raise ValueError("relay text frame exceeds USB protocol maximum")
+        if not self._send(UsbFrameType.HOST_TEXT, payload_bytes):
+            # A lost fence/state frame must not silently strand the firmware.
+            # Closing the relay forces a new handshake; firmware also detects
+            # a missing fence if the queued bytes are later lost on the wire.
+            raise OSError("serial control transmit queue is full")
+        if matching_fence:
+            logger.info("USB output fence queued id=%s", self._pending_interrupt)
+            self._pending_interrupt = None
+            self._interrupt.clear()
+        return True
+
     async def _open_relay(self, raw_payload: bytes) -> None:
         try:
             payload: dict[str, Any] = json.loads(raw_payload)
             device_id = str(payload["device_id"]).strip()
             token = str(payload["device_token"]).strip()
+            recovery_id = payload.get("recovery_id")
+            if recovery_id is not None and (
+                type(recovery_id) is not int or not 0 < recovery_id <= 0xFFFFFFFF
+            ):
+                raise ValueError("invalid recovery identifier")
         except (KeyError, TypeError, ValueError, json.JSONDecodeError):
             self._send(UsbFrameType.HOST_CLOSE, b"invalid device credentials")
             return
@@ -357,6 +420,8 @@ class UsbBridge:
             return
 
         await self._close_relay(send_close=False)
+        self._pending_interrupt = None
+        self._interrupt.clear()
         try:
             self._relay = await connect(
                 self._relay_url,
@@ -376,7 +441,13 @@ class UsbBridge:
 
         self._metrics.reconnects += 1
         self._set_status(state="relay_connected", relay_connected=True, last_error=None)
-        self._send(UsbFrameType.HOST_OPEN_ACK)
+        acknowledgment = (
+            json.dumps({"recovery_id": recovery_id}).encode("utf-8")
+            if recovery_id is not None else b""
+        )
+        if not self._send(UsbFrameType.HOST_OPEN_ACK, acknowledgment):
+            await self._close_relay(send_close=False)
+            return
         self._relay_reader = asyncio.create_task(self._read_relay(), name="usb-relay-reader")
 
     async def _read_relay(self) -> None:
@@ -386,10 +457,7 @@ class UsbBridge:
         try:
             async for message in self._relay:
                 if isinstance(message, str):
-                    payload = message.encode("utf-8")
-                    if len(payload) > MAX_PAYLOAD_BYTES:
-                        raise ValueError("relay text frame exceeds USB protocol maximum")
-                    self._send(UsbFrameType.HOST_TEXT, payload)
+                    self._forward_relay_control(message)
                 else:
                     # Foundry may produce audio faster than wall clock. TCP can
                     # apply backpressure, but USB CDC cannot, so an 8 KiB burst
@@ -399,6 +467,10 @@ class UsbBridge:
                     if now - audio_deadline > 0.200:
                         audio_deadline = now - USB_AUDIO_LEAD_SECONDS
                     for offset in range(0, len(message), USB_AUDIO_FRAME_BYTES):
+                        if self._pending_interrupt is not None:
+                            self._metrics.interrupted_audio_bytes += len(message) - offset
+                            audio_deadline = loop.time() - USB_AUDIO_LEAD_SECONDS
+                            break
                         chunk = message[offset : offset + USB_AUDIO_FRAME_BYTES]
                         self._send(
                             UsbFrameType.HOST_BINARY,
@@ -407,9 +479,14 @@ class UsbBridge:
                         audio_deadline += len(chunk) / PCM16_MONO_BYTES_PER_SECOND
                         delay = audio_deadline - loop.time()
                         if delay > 0:
-                            await asyncio.sleep(delay)
-        except (ConnectionClosed, ValueError) as exc:
+                            try:
+                                await asyncio.wait_for(self._interrupt.wait(), timeout=delay)
+                            except TimeoutError:
+                                pass
+        except (ConnectionClosed, OSError, ValueError) as exc:
             logger.info("relay reader ended device=%s: %s", self._device_id, exc)
+            if self._relay is not None:
+                await self._relay.close()
         finally:
             self._relay = None
             self._relay_reader = None
@@ -431,12 +508,13 @@ class UsbBridge:
             self._send(UsbFrameType.HOST_CLOSE)
         self._set_status(relay_connected=False)
 
-    def _send(self, frame_type: UsbFrameType, payload: bytes = b"") -> None:
+    def _send(self, frame_type: UsbFrameType, payload: bytes = b"") -> bool:
         if self._worker is None or not self._worker.send(frame_type, payload):
             self._set_status(last_error="serial transmit queue is full")
-            return
+            return False
         self._metrics.transmitted_frames += 1
         self._write_status()
+        return True
 
     def _track_sequence(self, sequence: int) -> None:
         if (

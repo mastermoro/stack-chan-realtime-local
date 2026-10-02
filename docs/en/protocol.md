@@ -113,3 +113,42 @@ uint32 crc32                     // header + payload
 Frame types are `HOST_PROBE=0x01`, `DEVICE_STATUS=0x02`, `DEVICE_OPEN=0x03`, `HOST_OPEN_ACK=0x04`, `DEVICE_CLOSE=0x05`, `HOST_CLOSE=0x06`, `DEVICE_TEXT=0x10`, `DEVICE_BINARY=0x11`, `HOST_TEXT=0x20`, `HOST_BINARY=0x21`, `DEVICE_LOG=0x30`, and `ERROR=0x7f`.
 
 The host sends `HOST_PROBE` every 500 ms. The device replies with `DEVICE_STATUS` containing `{"protocol":1,"device_id":"..."}` whether or not USB is the selected Relay route. To open USB as the route, the device sends `DEVICE_OPEN` with its device ID and token; the bridge then opens the authenticated local WebSocket and returns `HOST_OPEN_ACK`. Thereafter `*_TEXT` and `*_BINARY` preserve the WebSocket message types. Sequence gaps and CRC failures are diagnostic counters; a damaged packet is discarded without terminating the stream.
+
+## Playback interruption fence (issue #12)
+
+Updated firmware adds a monotonically increasing `interrupt_id` (integer 1–4294967295)
+to `conversation.pause` / `response.cancel`. It stops playback and suppresses response
+state, PCM, and completion callbacks locally before sending. Face-mode microphone
+capture can resume immediately.
+
+```json
+{"type":"conversation.pause","interrupt_id":42}
+{"type":"conversation.paused","interrupt_id":42}
+```
+
+The Relay drains in-flight output before sending the matching acknowledgment on the
+same ordered stream. No output from the cancelled response may follow that fence.
+The USB bridge wakes its pacing wait and discards queued output through the matching
+fence. Only the latest matching ID reopens output; stale acknowledgments, `speaking`,
+timers, and buffered `session.reconnected` messages do not. A genuinely new transport
+connection resets the local fence.
+
+Clients without IDs remain supported. Update Relay / USB bridge before flashing the
+new firmware. An old Relay cannot acknowledge the fence, so updated firmware fails
+closed and reconnects after its acknowledgment deadline instead of replaying cancelled speech.
+Recovery requires the updated bridge too; it does not silently downgrade to unsafe playback.
+
+If an upstream no-active-response cancellation error omits its client event ID while
+cancellation is pending, the Relay reconnects Foundry instead of guessing which
+cancel it acknowledges. This exceptional recovery resets conversation context, but
+prevents stale playback from reopening or leaving output permanently muted.
+
+A missing acknowledgment after five seconds disconnects the old transport; elapsed time
+never releases playback by itself. USB recovery adds a positive uint32 `recovery_id` to
+DeviceOpen. Only after closing the old WebSocket and opening a fresh one does the bridge
+echo this ID in the JSON HostOpenAck payload. While recovering, firmware rejects empty,
+nonmatching, or incorrectly typed open acknowledgments. Ordinary legacy DeviceOpen and
+empty HostOpenAck remain supported. Failed control-frame enqueue closes the relay socket.
+
+A HostClose received while a USB fence is pending also requires the correlated recovery
+handshake. A buffered HostClose followed by an empty HostOpenAck is insufficient to reopen output.

@@ -29,3 +29,5 @@ jobs:
       - run: cp include/secrets.example.hpp include/secrets.hpp
       - run: cp include/relay_endpoint.example.hpp include/relay_endpoint.hpp
       - run: pio run
+      - name: Run native transport and interrupt regressions
+        run: python tests/host/run_tests.py

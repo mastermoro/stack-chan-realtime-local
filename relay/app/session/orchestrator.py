@@ -22,6 +22,10 @@ DEVICE_AUDIO_QUEUE_FRAMES = 5
 DEVICE_OUTPUT_AUDIO_FRAME_BYTES = 8 * 1024
 
 
+class UpstreamResetRequired(Exception):
+    """The current upstream session cannot safely continue producing output."""
+
+
 def enqueue_latest_audio(queue: asyncio.Queue[bytes], chunk: bytes) -> bool:
     """Put a live audio frame into a bounded queue, evicting stale audio first."""
     try:
@@ -54,6 +58,7 @@ class RelaySession:
         self._hello_received = False
         self._state = DeviceState.READY
         self._upstream_send_lock = asyncio.Lock()
+        self._downstream_send_lock = asyncio.Lock()
         self._tool_tasks: set[asyncio.Task[None]] = set()
         self._pending_tool_calls = 0
         self._function_call_seen = False
@@ -62,6 +67,12 @@ class RelaySession:
         self._dropped_audio_frames = 0
         self._output_suppressed = False
         self._cancellation_pending = False
+        self._upstream_reset_required = False
+        self._output_generation = 0
+        self._active_response_id: str | None = None
+        self._retired_response_ids: set[str] = set()
+        self._pending_cancel_event_id: str | None = None
+        self._pending_cancel_response_id: str | None = None
         self._announced_output_item: tuple[str, int] | None = None
         self._face_mode = False
 
@@ -87,7 +98,7 @@ class RelaySession:
                     await asyncio.sleep(UPSTREAM_RECONNECT_DELAY_SECONDS)
             except WebSocketDisconnect:
                 raise
-            except (ConnectionClosed, OSError) as exc:
+            except (ConnectionClosed, OSError, UpstreamResetRequired) as exc:
                 logger.warning("Foundry session disconnected device=%s: %s", self.device_id, exc)
                 await self.websocket.send_json(
                     {
@@ -114,18 +125,14 @@ class RelaySession:
         realtime_task = asyncio.create_task(
             self._realtime_to_device(connection), name="realtime_to_device"
         )
+        tasks = {device_task, audio_sender_task, realtime_task}
         try:
-            done, pending = await asyncio.wait(
-                {device_task, audio_sender_task, realtime_task}, return_when=asyncio.FIRST_COMPLETED
-            )
+            done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
             logger.warning(
                 "connection task completed device=%s tasks=%s",
                 self.device_id,
                 ",".join(task.get_name() for task in done),
             )
-            for task in pending:
-                task.cancel()
-            await asyncio.gather(*pending, return_exceptions=True)
             for task in done:
                 exc = task.exception()
                 if exc:
@@ -133,14 +140,27 @@ class RelaySession:
             if device_task in done:
                 raise WebSocketDisconnect(code=1000)
         finally:
+            # Join all senders even if this supervisor itself is cancelled or a
+            # child raises. In-progress interrupts finish their output fence
+            # before a replacement upstream session can reset suppression.
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
             self._clear_queued_audio()
             self._device_audio_queue = None
             await self._cancel_tool_tasks()
 
     def _reset_upstream_response_state(self) -> None:
+        self._output_generation += 1
         self._output_suppressed = False
         self._cancellation_pending = False
+        self._upstream_reset_required = False
         self._announced_output_item = None
+        self._active_response_id = None
+        self._retired_response_ids.clear()
+        self._pending_cancel_event_id = None
+        self._pending_cancel_response_id = None
 
     async def _cancel_tool_tasks(self) -> None:
         tasks = tuple(self._tool_tasks)
@@ -254,37 +274,32 @@ class RelaySession:
     async def _realtime_to_device(self, connection: Any) -> None:
         async for event in connection:
             event_type = event.type
+            generation = self._output_generation
+            response_id = self._event_response_id(event)
 
             if event_type == "response.created":
                 # Foundry can still deliver response.created after a client has
                 # cancelled it. Keep that stale response muted until response.done.
-                if self._cancellation_pending:
-                    continue
-                self._output_suppressed = False
-                self._announced_output_item = None
-                await self._set_state(DeviceState.THINKING)
+                async with self._downstream_send_lock:
+                    if response_id in self._retired_response_ids:
+                        continue
+                    if (
+                        self._upstream_reset_required
+                        or self._cancellation_pending
+                        or generation != self._output_generation
+                    ):
+                        if response_id is not None:
+                            self._retired_response_ids.add(response_id)
+                            if self._pending_cancel_response_id is None:
+                                self._pending_cancel_response_id = response_id
+                        continue
+                    self._active_response_id = response_id
+                    self._output_suppressed = False
+                    self._announced_output_item = None
+                    await self._set_state_locked(DeviceState.THINKING)
             elif event_type in {"response.output_audio.delta", "response.audio.delta"}:
-                if self._output_suppressed or self._cancellation_pending:
-                    continue
-                await self._set_state(DeviceState.SPEAKING)
-                item_id = getattr(event, "item_id", None)
-                content_index = getattr(event, "content_index", None)
-                if isinstance(item_id, str) and isinstance(content_index, int):
-                    output_item = (item_id, content_index)
-                    if output_item != self._announced_output_item:
-                        self._announced_output_item = output_item
-                        await self.websocket.send_json(
-                            {
-                                "type": "output_audio.started",
-                                "item_id": item_id,
-                                "content_index": content_index,
-                            }
-                        )
-                audio_bytes = base64.b64decode(event.delta)
-                for offset in range(0, len(audio_bytes), DEVICE_OUTPUT_AUDIO_FRAME_BYTES):
-                    await self.websocket.send_bytes(
-                        audio_bytes[offset : offset + DEVICE_OUTPUT_AUDIO_FRAME_BYTES]
-                    )
+                if self._response_event_allowed(event):
+                    await self._send_response_audio(event, generation)
             elif event_type == "conversation.item.input_audio_transcription.completed":
                 if self.settings.transcript_logging:
                     logger.info("device=%s transcript=%s", self.device_id, event.transcript)
@@ -295,24 +310,63 @@ class RelaySession:
                 self._start_function_call(connection, event)
             elif event_type == "response.done":
                 logger.info("response.done device=%s; retaining device WebSocket", self.device_id)
-                self._cancellation_pending = False
+                # A cancelled response belongs to the old turn. In particular,
+                # it must not restore READY after the device starts listening.
+                if self._cancellation_pending or self._output_suppressed:
+                    if (
+                        response_id is None
+                        or response_id == self._pending_cancel_response_id
+                        or (
+                            self._pending_cancel_response_id is None
+                            and response_id not in self._retired_response_ids
+                        )
+                    ):
+                        self._cancellation_pending = False
+                        self._active_response_id = None
+                    if response_id is not None:
+                        self._retired_response_ids.add(response_id)
+                    continue
+                if not self._response_event_allowed(event):
+                    continue
+                if response_id is not None:
+                    self._retired_response_ids.add(response_id)
+                self._active_response_id = None
                 if self._function_call_seen:
                     if self._pending_tool_calls:
                         self._response_done_waiting_for_tools = True
                     else:
-                        await self._request_tool_followup(connection)
+                        await self._request_tool_followup(connection, generation)
                 else:
-                    await self.websocket.send_json({"type": "response.done"})
-                    await self._set_state(DeviceState.READY)
+                    async with self._downstream_send_lock:
+                        if not self._response_output_allowed(generation):
+                            continue
+                        await self.websocket.send_json({"type": "response.done"})
+                        if self._response_output_allowed(generation):
+                            await self._set_state_locked(DeviceState.READY)
             elif event_type == "error":
                 message = getattr(getattr(event, "error", None), "message", "Realtime error")
                 if "cancellation failed: no active response found" in message.lower():
-                    # The response ended just before the client's pause reached
-                    # Foundry. response.done may already have cleared
-                    # _cancellation_pending before this event arrives, so the
-                    # message itself is the reliable race marker. This error can
-                    # only be produced in response to our response.cancel call.
-                    self._cancellation_pending = False
+                    # A late failure for an earlier cancel must not release a
+                    # newer pause. Some upstream peers omit the optional
+                    # event_id, so a pending cancel cannot safely use that error
+                    # as its completion. Reconnect instead of unmuting old audio
+                    # or leaving the next turn permanently suppressed.
+                    cancel_event_id = getattr(getattr(event, "error", None), "event_id", None)
+                    if not isinstance(cancel_event_id, str) or not cancel_event_id:
+                        if self._cancellation_pending:
+                            self._upstream_reset_required = True
+                            logger.warning(
+                                "Uncorrelated cancellation error device=%s; reconnecting "
+                                "upstream and resetting conversation history",
+                                self.device_id,
+                            )
+                            return
+                    elif (
+                        self._cancellation_pending
+                        and cancel_event_id == self._pending_cancel_event_id
+                    ):
+                        self._cancellation_pending = False
+                        self._active_response_id = None
                     logger.debug("response was already complete when cancelled")
                     continue
                 logger.error("Realtime API error device=%s: %s", self.device_id, message)
@@ -320,15 +374,32 @@ class RelaySession:
 
     async def _interrupt_response(self, connection: Any, payload: dict[str, Any]) -> None:
         """Cancel output and synchronize server history with device playback."""
+        self._output_generation += 1
         self._output_suppressed = True
-        await self._cancel_tool_tasks()
+        if self._active_response_id is not None:
+            self._retired_response_ids.add(self._active_response_id)
+        self._pending_cancel_response_id = self._active_response_id
+        cancel_event_id = f"stackchan-cancel-{self._output_generation}"
+        self._pending_cancel_event_id = cancel_event_id
+        # Mark cancellation before any await: response.created/done can arrive
+        # while response.cancel is still sending on the upstream socket.
+        self._cancellation_pending = True
+        # Do not hold the downstream lock while joining tools. A cancelled tool
+        # can be waiting for that lock (or unwinding a send that holds it).
         try:
+            await self._cancel_tool_tasks()
             async with self._upstream_send_lock:
                 try:
-                    await connection.response.cancel()
-                    self._cancellation_pending = True
-                except Exception:  # Realtime may have no active response.
-                    logger.debug("response.cancel ignored", exc_info=True)
+                    await connection.response.cancel(event_id=cancel_event_id)
+                except Exception as exc:
+                    # SDK send failures are not Realtime's no-active-response
+                    # error (which arrives as an event). Delivery is uncertain:
+                    # keep every response muted until a clean session replaces
+                    # this one, including when done/error races with teardown.
+                    self._upstream_reset_required = True
+                    raise UpstreamResetRequired(
+                        "Could not send response.cancel; resetting conversation history"
+                    ) from exc
                 position = self._playback_position(payload)
                 if position is not None:
                     item_id, content_index, audio_end_ms = position
@@ -343,7 +414,100 @@ class RelaySession:
                         # output item. Cancellation is still useful in that case.
                         logger.debug("response truncate ignored", exc_info=True)
         finally:
-            await self._set_state(DeviceState.READY)
+            # Teardown may cancel this task while it is already sending the
+            # fence. Shield that send and join it before propagating cancellation
+            # so the replacement session cannot strand a device waiting for ack.
+            fence = asyncio.create_task(self._send_interrupt_fence(payload))
+            cancelled = False
+            while not fence.done():
+                try:
+                    await asyncio.shield(fence)
+                except asyncio.CancelledError:
+                    cancelled = True
+            fence.result()
+            if cancelled:
+                raise asyncio.CancelledError
+
+    async def _send_interrupt_fence(self, payload: dict[str, Any]) -> None:
+        # Drain any send already in progress. Output rechecks prevent the rest
+        # of an old delta from resuming behind this ordered fence.
+        async with self._downstream_send_lock:
+            await self._set_state_locked(DeviceState.READY)
+            interrupt_id = payload.get("interrupt_id")
+            if (
+                payload.get("type") in {"conversation.pause", "response.cancel"}
+                and isinstance(interrupt_id, int)
+                and not isinstance(interrupt_id, bool)
+                and 0 < interrupt_id <= 0xFFFFFFFF
+            ):
+                await self.websocket.send_json(
+                    {"type": "conversation.paused", "interrupt_id": interrupt_id}
+                )
+
+    def _response_output_allowed(self, generation: int) -> bool:
+        return (
+            generation == self._output_generation
+            and not self._upstream_reset_required
+            and not self._output_suppressed
+            and not self._cancellation_pending
+        )
+
+    @staticmethod
+    def _event_response_id(event: Any) -> str | None:
+        response_id = getattr(event, "response_id", None)
+        if response_id is None:
+            response_id = getattr(getattr(event, "response", None), "id", None)
+        return response_id if isinstance(response_id, str) and response_id else None
+
+    def _response_event_allowed(self, event: Any) -> bool:
+        response_id = self._event_response_id(event)
+        return response_id is None or (
+            response_id not in self._retired_response_ids
+            and self._active_response_id in {None, response_id}
+        )
+
+    async def _send_response_audio(self, event: Any, generation: int) -> None:
+        async with self._downstream_send_lock:
+            if (
+                not self._response_output_allowed(generation)
+                or not self._response_event_allowed(event)
+            ):
+                return
+            await self._set_state_locked(DeviceState.SPEAKING)
+            if not self._response_output_allowed(generation):
+                return
+            item_id = getattr(event, "item_id", None)
+            content_index = getattr(event, "content_index", None)
+            if isinstance(item_id, str) and isinstance(content_index, int):
+                output_item = (item_id, content_index)
+                if output_item != self._announced_output_item:
+                    self._announced_output_item = output_item
+                    await self.websocket.send_json(
+                        {
+                            "type": "output_audio.started",
+                            "item_id": item_id,
+                            "content_index": content_index,
+                        }
+                    )
+            audio_bytes = base64.b64decode(event.delta)
+            for offset in range(0, len(audio_bytes), DEVICE_OUTPUT_AUDIO_FRAME_BYTES):
+                if not self._response_output_allowed(generation):
+                    return
+                await self.websocket.send_bytes(
+                    audio_bytes[offset : offset + DEVICE_OUTPUT_AUDIO_FRAME_BYTES]
+                )
+
+    async def _send_response_json(self, payload: dict[str, Any], generation: int) -> None:
+        async with self._downstream_send_lock:
+            if self._response_output_allowed(generation):
+                await self.websocket.send_json(payload)
+
+    async def _set_response_state(self, state: DeviceState, generation: int) -> bool:
+        async with self._downstream_send_lock:
+            if not self._response_output_allowed(generation):
+                return False
+            await self._set_state_locked(state)
+            return self._response_output_allowed(generation)
 
     @staticmethod
     def _playback_position(payload: dict[str, Any]) -> tuple[str, int, int] | None:
@@ -364,54 +528,67 @@ class RelaySession:
         return item_id, content_index, audio_end_ms
 
     def _start_function_call(self, connection: Any, event: Any) -> None:
+        generation = self._output_generation
+        if not self._response_output_allowed(generation) or not self._response_event_allowed(event):
+            return
         self._function_call_seen = True
         self._pending_tool_calls += 1
-        task = asyncio.create_task(self._handle_function_call(connection, event))
+        task = asyncio.create_task(self._handle_function_call(connection, event, generation))
         self._tool_tasks.add(task)
         task.add_done_callback(self._tool_tasks.discard)
 
-    async def _handle_function_call(self, connection: Any, event: Any) -> None:
+    async def _handle_function_call(self, connection: Any, event: Any, generation: int) -> None:
         cancelled = False
         try:
+            if not self._response_output_allowed(generation):
+                return
             if event.name == "set_emotion":
                 arguments = json.loads(event.arguments)
                 emotion = arguments.get("emotion")
                 allowed_emotions = {"neutral", "happy", "sad", "angry", "surprised", "sleepy"}
                 if emotion not in allowed_emotions:
                     await self._send_function_output(
-                        connection, event.call_id, {"error": "invalid emotion"}
+                        connection, event.call_id, {"error": "invalid emotion"}, generation
                     )
                     return
-                await self.websocket.send_json({"type": "emotion", "emotion": emotion})
-                await self._send_function_output(connection, event.call_id, {"emotion": emotion})
+                await self._send_response_json({"type": "emotion", "emotion": emotion}, generation)
+                await self._send_function_output(
+                    connection, event.call_id, {"emotion": emotion}, generation
+                )
                 return
 
             if self.local_actions.supports(event.name):
                 arguments = json.loads(event.arguments)
                 result = await self.local_actions.execute(event.name, arguments)
-                await self._send_function_output(connection, event.call_id, result)
-                await self.websocket.send_json(
-                    {"type": "notice", "title": "LOCAL ACTION", "detail": "Browser opened on PC"}
+                await self._send_function_output(connection, event.call_id, result, generation)
+                await self._send_response_json(
+                    {"type": "notice", "title": "LOCAL ACTION", "detail": "Browser opened on PC"},
+                    generation,
                 )
                 return
 
             if event.name != "search_web":
                 await self._send_function_output(
-                    connection, event.call_id, {"error": "unsupported tool"}
+                    connection, event.call_id, {"error": "unsupported tool"}, generation
                 )
                 return
 
             arguments = json.loads(event.arguments)
             query = arguments["query"]
-            await self._set_state(DeviceState.SEARCHING)
+            if not await self._set_response_state(DeviceState.SEARCHING, generation):
+                return
             # The Responses client owns the HTTP timeout. asyncio.wait_for would
             # only cancel the wrapper around asyncio.to_thread(), leaving the
             # blocking request alive in a worker thread after the Relay reports a
             # false failure.
             result = await self.web_search.search(query)
-            await self._send_function_output(connection, event.call_id, result.as_tool_output())
+            await self._send_function_output(
+                connection, event.call_id, result.as_tool_output(), generation
+            )
             if result.sources:
-                await self.websocket.send_json(SourcesMessage(sources=result.sources).model_dump())
+                await self._send_response_json(
+                    SourcesMessage(sources=result.sources).model_dump(), generation
+                )
         except asyncio.CancelledError:
             cancelled = True
             raise
@@ -422,6 +599,7 @@ class RelaySession:
                     connection,
                     event.call_id,
                     {"error": "FUNCTION_CALL_FAILED", "message": str(exc)},
+                    generation,
                 )
             except Exception:
                 logger.debug(
@@ -431,15 +609,18 @@ class RelaySession:
             self._pending_tool_calls -= 1
             if (
                 not cancelled
+                and self._response_output_allowed(generation)
                 and self._pending_tool_calls == 0
                 and self._response_done_waiting_for_tools
             ):
-                await self._request_tool_followup(connection)
+                await self._request_tool_followup(connection, generation)
 
     async def _send_function_output(
-        self, connection: Any, call_id: str, output: dict[str, Any]
+        self, connection: Any, call_id: str, output: dict[str, Any], generation: int
     ) -> None:
         async with self._upstream_send_lock:
+            if not self._response_output_allowed(generation):
+                return
             await connection.conversation.item.create(
                 item={
                     "type": "function_call_output",
@@ -448,14 +629,27 @@ class RelaySession:
                 }
             )
 
-    async def _request_tool_followup(self, connection: Any) -> None:
+    async def _request_tool_followup(
+        self, connection: Any, generation: int | None = None
+    ) -> None:
+        if generation is None:
+            generation = self._output_generation
+        if not self._response_output_allowed(generation):
+            return
         self._function_call_seen = False
         self._response_done_waiting_for_tools = False
-        await self._set_state(DeviceState.THINKING)
+        if not await self._set_response_state(DeviceState.THINKING, generation):
+            return
         async with self._upstream_send_lock:
+            if not self._response_output_allowed(generation):
+                return
             await connection.response.create()
 
     async def _set_state(self, state: DeviceState) -> None:
+        async with self._downstream_send_lock:
+            await self._set_state_locked(state)
+
+    async def _set_state_locked(self, state: DeviceState) -> None:
         self._state = state
         if state != DeviceState.LISTENING:
             self._clear_queued_audio()
