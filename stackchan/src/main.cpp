@@ -28,6 +28,7 @@ AgentState state = AgentState::Disconnected;
 int16_t capture_buffer[kFrameSamples];
 bool conversation_active = false;
 bool resume_after_response = false;
+bool context_reset_on_resume = false;
 bool relay_started = false;
 enum class ConnectionMode : uint8_t { Auto, Wifi, Usb };
 enum class UiPage : uint8_t { Status, Face, Network, Settings };
@@ -1067,7 +1068,8 @@ void start_relay_when_wifi_ready() {
 void start_listening() {
   if (!conversation_active || !relay.connected()) return;
   resume_after_response = false;
-  detail = "Listening... speak now";
+  detail = context_reset_on_resume ? "Context reset; speak now" : "Listening... speak now";
+  context_reset_on_resume = false;
   relay.send_control("audio.start");
   handle_state(AgentState::Listening);
 }
@@ -1077,6 +1079,7 @@ void handle_state(AgentState next) {
   if (next == AgentState::Error || next == AgentState::Disconnected) {
     conversation_active = false;
     resume_after_response = false;
+    context_reset_on_resume = false;
   }
   audio.set_capture_enabled(conversation_active && next == AgentState::Listening);
   render_ui();
@@ -1103,7 +1106,8 @@ void handle_session_reconnected() {
   // Relay will send ready immediately after this notification. Re-enter
   // listening through the normal ready transition, not as a fake response.
   resume_after_response = true;
-  detail = "Foundry reconnected; your turn";
+  context_reset_on_resume = true;
+  detail = "Foundry reconnected; context reset";
   render_ui();
 }
 
@@ -1113,6 +1117,7 @@ void handle_emotion(const char* next_emotion) {
 }
 
 void handle_notice(const char* title, const char* message) {
+  if (!strcmp(title, "CONVERSATION RESET")) context_reset_on_resume = true;
   detail = String(title) + ": " + message;
   if (detail.length() > 46) {
     detail = detail.substring(0, 43) + "...";
@@ -1199,7 +1204,7 @@ void enter_face_listening() {
   if (state == AgentState::Thinking || state == AgentState::Searching ||
       state == AgentState::Speaking) {
     audio.stop_playback();
-    relay.send_control("conversation.pause");
+    if (!relay.send_control("conversation.pause")) return;
   }
   conversation_active = true;
   start_listening();
@@ -1407,7 +1412,7 @@ void handle_touch() {
       audio.stop_playback();
       conversation_active = true;
       resume_after_response = false;
-      relay.send_control("conversation.pause");
+      if (!relay.send_control("conversation.pause")) return;
       start_listening();
       return;
     }

@@ -135,9 +135,20 @@ connection resets the local fence.
 
 Clients without IDs remain supported. Update Relay / USB bridge before flashing the
 new firmware. An old Relay cannot acknowledge the fence, so updated firmware fails
-closed rather than replaying cancelled speech.
+closed and reconnects after its acknowledgment deadline instead of replaying cancelled speech.
+Recovery requires the updated bridge too; it does not silently downgrade to unsafe playback.
 
 If an upstream no-active-response cancellation error omits its client event ID while
 cancellation is pending, the Relay reconnects Foundry instead of guessing which
 cancel it acknowledges. This exceptional recovery resets conversation context, but
 prevents stale playback from reopening or leaving output permanently muted.
+
+A missing acknowledgment after five seconds disconnects the old transport; elapsed time
+never releases playback by itself. USB recovery adds a positive uint32 `recovery_id` to
+DeviceOpen. Only after closing the old WebSocket and opening a fresh one does the bridge
+echo this ID in the JSON HostOpenAck payload. While recovering, firmware rejects empty,
+nonmatching, or incorrectly typed open acknowledgments. Ordinary legacy DeviceOpen and
+empty HostOpenAck remain supported. Failed control-frame enqueue closes the relay socket.
+
+A HostClose received while a USB fence is pending also requires the correlated recovery
+handshake. A buffered HostClose followed by an empty HostOpenAck is insufficient to reopen output.

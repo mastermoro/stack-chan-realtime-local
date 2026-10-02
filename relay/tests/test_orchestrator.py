@@ -5,12 +5,14 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi import WebSocketDisconnect
+from websockets.exceptions import ConnectionClosed
 
 from app.config.settings import Settings
 from app.protocol.messages import DeviceState
 from app.session.orchestrator import (
     DEVICE_OUTPUT_AUDIO_FRAME_BYTES,
     RelaySession,
+    UpstreamResetRequired,
     enqueue_latest_audio,
     session_connected_message,
 )
@@ -758,9 +760,9 @@ def test_done_from_retired_response_cannot_release_cancel_before_response_create
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("event_id", [None, ""])
-def test_uncorrelated_cancel_error_reconnects_after_fence_and_recovers_next_turn(
-    monkeypatch: pytest.MonkeyPatch, event_id: str | None
+@pytest.mark.parametrize("recovery_cause", ["untagged", "empty_tag", "oserror", "closed", "local"])
+def test_cancel_failure_reconnects_after_fence_and_recovers_next_turn(
+    monkeypatch: pytest.MonkeyPatch, recovery_cause: str
 ) -> None:
     class SessionWebSocket(FakeWebSocket):
         def __init__(self) -> None:
@@ -784,9 +786,13 @@ def test_uncorrelated_cancel_error_reconnects_after_fence_and_recovers_next_turn
                 pass
 
     class SessionConnection(FakeConnection):
-        def __init__(self, *, block_cancel: bool = False) -> None:
+        def __init__(
+            self, *, block_cancel: bool = False, cancel_failure: Exception | None = None
+        ) -> None:
             super().__init__()
             self.block_cancel = block_cancel
+            self.cancel_failure = cancel_failure
+            self.cancel_release = asyncio.Event()
             self.events: asyncio.Queue[SimpleNamespace] = asyncio.Queue()
             self.input_audio_buffer = SimpleNamespace(append=self.append_audio)
             self.input_audio: list[bytes] = []
@@ -805,7 +811,9 @@ def test_uncorrelated_cancel_error_reconnects_after_fence_and_recovers_next_turn
         async def cancel_response(self, *, event_id: str) -> None:
             await super().cancel_response(event_id=event_id)
             if self.block_cancel:
-                await asyncio.Event().wait()
+                await self.cancel_release.wait()
+            if self.cancel_failure is not None:
+                raise self.cancel_failure
 
     class SessionRealtime:
         def __init__(self, connections: list[SessionConnection]) -> None:
@@ -827,7 +835,12 @@ def test_uncorrelated_cancel_error_reconnects_after_fence_and_recovers_next_turn
     async def scenario() -> None:
         websocket = SessionWebSocket()
         session = RelaySession(websocket, "stackchan-001", Settings())
-        old_connection = SessionConnection(block_cancel=True)
+        cancel_failure = {
+            "oserror": OSError("cancel send failed"),
+            "closed": ConnectionClosed(None, None),
+            "local": RuntimeError("unexpected SDK failure"),
+        }.get(recovery_cause)
+        old_connection = SessionConnection(block_cancel=True, cancel_failure=cancel_failure)
         new_connection = SessionConnection()
         realtime = SessionRealtime([old_connection, new_connection])
         session.realtime = realtime
@@ -846,17 +859,22 @@ def test_uncorrelated_cancel_error_reconnects_after_fence_and_recovers_next_turn
                 {"text": '{"type":"conversation.pause","interrupt_id":51}'}
             )
             await old_connection.cancellation_started.wait()
-            # Force real _run_connection teardown while pause is awaiting the
-            # upstream cancel send. Its finally must still send the fence.
-            old_connection.events.put_nowait(
-                SimpleNamespace(
-                    type="error",
-                    error=SimpleNamespace(
-                        message="Cancellation failed: no active response found",
-                        event_id=event_id,
-                    ),
+            if cancel_failure is None:
+                # Teardown cancels pause while the SDK send is still awaiting.
+                old_connection.events.put_nowait(
+                    SimpleNamespace(
+                        type="error",
+                        error=SimpleNamespace(
+                            message="Cancellation failed: no active response found",
+                            event_id=None if recovery_cause == "untagged" else "",
+                        ),
+                    )
                 )
-            )
+            else:
+                # A failed SDK send must trigger the same clean recovery. A
+                # buffered done must not lift suppression during teardown.
+                old_connection.cancel_release.set()
+                old_connection.events.put_nowait(response_event("response.done", "old"))
             old_connection.events.put_nowait(response_event("response.created", "stale"))
             old_connection.events.put_nowait(audio_event(b"stale", response_id="stale"))
             await websocket.wait_for_output(
@@ -872,6 +890,7 @@ def test_uncorrelated_cancel_error_reconnects_after_fence_and_recovers_next_turn
             )
             assert not session._cancellation_pending
             assert not session._output_suppressed
+            assert not session._upstream_reset_required
             assert not session._retired_response_ids
             assert session._pending_cancel_event_id is None
             assert session._pending_cancel_response_id is None
@@ -896,5 +915,108 @@ def test_uncorrelated_cancel_error_reconnects_after_fence_and_recovers_next_turn
         finally:
             running.cancel()
             await asyncio.gather(running, return_exceptions=True)
+
+    asyncio.run(asyncio.wait_for(scenario(), timeout=2))
+
+
+@pytest.mark.parametrize("failure_type", [OSError, ConnectionClosed, RuntimeError])
+def test_failed_cancel_does_not_unmute_buffered_response_after_fence(failure_type: type) -> None:
+    class FailedCancel(FakeConnection):
+        async def cancel_response(self, *, event_id: str) -> None:
+            await super().cancel_response(event_id=event_id)
+            if failure_type is ConnectionClosed:
+                raise ConnectionClosed(None, None)
+            raise failure_type("cancel send failed")
+
+    async def scenario() -> None:
+        websocket = FakeWebSocket()
+        session = RelaySession(websocket, "stackchan-001", Settings())
+        connection = FailedCancel()
+        with pytest.raises(UpstreamResetRequired):
+            await session._interrupt_response(
+                connection, {"type": "conversation.pause", "interrupt_id": 61}
+            )
+        assert websocket.events[-1] == {"type": "conversation.paused", "interrupt_id": 61}
+        fence_end = len(websocket.events)
+        await send_realtime_events(
+            session,
+            response_event("response.done", "ended-before-cancel"),
+            cancel_error(connection.cancel_event_ids[-1]),
+            response_event("response.created", "already-buffered"),
+            audio_event(b"STALE", response_id="already-buffered"),
+        )
+        assert session._upstream_reset_required
+        assert session._output_suppressed
+        assert websocket.events[fence_end:] == []
+
+    asyncio.run(scenario())
+
+
+def test_cancelling_connection_supervisor_joins_senders_and_finishes_pending_fence() -> None:
+    class ReceivingWebSocket(FakeWebSocket):
+        def __init__(self) -> None:
+            super().__init__()
+            self.incoming: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+
+        async def receive(self) -> dict[str, object]:
+            return await self.incoming.get()
+
+    class BlockingConnection(FakeConnection):
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self) -> SimpleNamespace:
+            await asyncio.Event().wait()
+            raise StopAsyncIteration
+
+        async def cancel_response(self, *, event_id: str) -> None:
+            await super().cancel_response(event_id=event_id)
+            await asyncio.Event().wait()
+
+    async def scenario() -> None:
+        websocket = ReceivingWebSocket()
+        session = RelaySession(websocket, "stackchan-001", Settings())
+        connection = BlockingConnection()
+        existing_tasks = asyncio.all_tasks()
+        running = asyncio.create_task(session._run_connection(connection))
+        websocket.incoming.put_nowait(
+            {"text": '{"type":"conversation.pause","interrupt_id":62}'}
+        )
+        await connection.cancellation_started.wait()
+        running.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await running
+        assert websocket.events == [
+            {"type": "state", "state": "ready"},
+            {"type": "conversation.paused", "interrupt_id": 62},
+        ]
+        assert session._device_audio_queue is None
+        assert not session._tool_tasks
+        assert asyncio.all_tasks() == existing_tasks
+
+    asyncio.run(asyncio.wait_for(scenario(), timeout=2))
+
+
+@pytest.mark.parametrize("after_send", [False, True])
+def test_teardown_cannot_cancel_an_in_flight_interrupt_fence(after_send: bool) -> None:
+    async def scenario() -> None:
+        websocket = BlockingOutputWebSocket(2, after_send=after_send)
+        session = RelaySession(websocket, "stackchan-001", Settings())
+        pause = asyncio.create_task(
+            session._interrupt_response(
+                FakeConnection(), {"type": "conversation.pause", "interrupt_id": 63}
+            )
+        )
+        await websocket.blocked.wait()
+        pause.cancel()
+        await asyncio.sleep(0)
+        assert not pause.done()
+        websocket.release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await pause
+        assert websocket.events == [
+            {"type": "state", "state": "ready"},
+            {"type": "conversation.paused", "interrupt_id": 63},
+        ]
 
     asyncio.run(asyncio.wait_for(scenario(), timeout=2))

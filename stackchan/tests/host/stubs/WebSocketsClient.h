@@ -15,6 +15,7 @@ class WebSocketsClient {
   std::vector<std::string> sent_text;
   std::vector<uint8_t> sent_audio;
   bool send_ok = true;
+  size_t disconnects = 0;
 
   WebSocketsClient() { instance = this; }
   void setExtraHeaders(const char*) {}
@@ -23,7 +24,7 @@ class WebSocketsClient {
   void setReconnectInterval(uint32_t) {}
   void enableHeartbeat(uint32_t, uint32_t, uint8_t) {}
   void onEvent(Handler value) { handler = std::move(value); }
-  void disconnect() {}
+  void disconnect() { ++disconnects; }
   void loop() {}
   bool sendTXT(String& text) {
     if (send_ok) sent_text.push_back(text);

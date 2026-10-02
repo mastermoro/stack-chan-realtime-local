@@ -220,9 +220,12 @@ def test_bridge_ignores_invalid_interrupt_ids(interrupt_id):
 
 
 def test_bridge_fence_requires_exact_ack_not_state_timer_or_reconnect_notice():
+    from types import SimpleNamespace
+
     from app.usb.bridge import UsbBridge
 
     bridge = UsbBridge("ws://unused")
+    bridge._worker = SimpleNamespace(send=lambda *_args: True)
     bridge._observe_device_control('{"type":"response.cancel","interrupt_id":1}')
     for payload in (
         {"type": "state", "state": "speaking"},
@@ -244,8 +247,151 @@ def test_bridge_fence_requires_exact_ack_not_state_timer_or_reconnect_notice():
 
 
 def test_bridge_legacy_client_without_interrupt_id_keeps_forwarding():
+    from types import SimpleNamespace
+
     from app.usb.bridge import UsbBridge
 
     bridge = UsbBridge("ws://unused")
+    bridge._worker = SimpleNamespace(send=lambda *_args: True)
     bridge._observe_device_control('{"type":"conversation.pause"}')
     assert bridge._forward_relay_control('{"type":"state","state":"ready"}')
+
+
+def test_serial_worker_reads_device_controls_under_continuous_output(monkeypatch):
+    """Exercise the real worker loop with a producer that never lets TX empty."""
+    from types import SimpleNamespace
+
+    loop = SimpleNamespace(call_soon_threadsafe=lambda callback, value: callback(value))
+    worker = SerialWorker("fake", loop)
+    pause = UsbFrame(
+        UsbFrameType.DEVICE_TEXT, 7,
+        b'{"type":"conversation.pause","interrupt_id":1}',
+    )
+
+    class FakePort:
+        in_waiting = 1
+
+        def __init__(self):
+            self.writes = 0
+            self.reads = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            pass
+
+        def write(self, data):
+            self.writes += 1
+            if self.writes > 32:
+                raise AssertionError("device input starved behind continuous serial output")
+            # Model a slow writer while Relay keeps replenishing its queue.
+            assert worker.send(UsbFrameType.HOST_BINARY, b"next audio")
+            return len(data)
+
+        def read(self, _size):
+            self.reads += 1
+            worker._stop.set()
+            return encode_frame(pause)
+
+    port = FakePort()
+    monkeypatch.setattr(worker, "_open_port", lambda: port)
+    worker.send(UsbFrameType.HOST_BINARY, b"first audio")
+    worker._run()
+    events = []
+    while not worker.events.empty():
+        events.append(worker.events.get_nowait())
+    assert port.reads == 1
+    assert port.writes <= 4
+    assert any(event.kind == "frame" and event.value == pause for event in events)
+
+
+@pytest.mark.asyncio
+async def test_bridge_failed_fence_enqueue_stays_fenced_and_closes_relay():
+    from types import SimpleNamespace
+
+    from app.usb.bridge import UsbBridge
+
+    class FakeRelay:
+        closed = False
+
+        async def close(self):
+            self.closed = True
+
+        async def __aiter__(self):
+            yield '{"type":"conversation.paused","interrupt_id":42}'
+            yield b"must not forward after losing the fence"
+
+    relay = FakeRelay()
+    frames = []
+    bridge = UsbBridge("ws://unused")
+    bridge._relay = relay
+    bridge._worker = SimpleNamespace(send=lambda kind, payload: frames.append((kind, payload)))
+    bridge._observe_device_control('{"type":"conversation.pause","interrupt_id":42}')
+    await bridge._read_relay()
+    assert bridge._pending_interrupt == 42
+    assert bridge._interrupt.is_set()
+    assert relay.closed
+    assert bridge._relay is None
+    assert not any(kind == UsbFrameType.HOST_BINARY for kind, _ in frames)
+    assert bridge._metrics.transmitted_frames == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("recovery_id", [None, 42])
+@pytest.mark.parametrize("enqueue_success", [False, True])
+async def test_bridge_recovery_ack_follows_new_relay_connection(
+    monkeypatch, recovery_id, enqueue_success,
+):
+    import asyncio
+    from types import SimpleNamespace
+
+    from app.usb.bridge import UsbBridge
+
+    class FakeRelay:
+        closed = False
+
+        async def close(self):
+            self.closed = True
+
+        async def __aiter__(self):
+            await asyncio.Event().wait()
+            yield ""
+
+    old_relay = FakeRelay()
+    new_relay = FakeRelay()
+    bridge = UsbBridge("ws://unused")
+    bridge._device_id = "test-device"
+    bridge._relay = old_relay
+    frames = []
+
+    def send(kind, payload=b""):
+        frames.append((kind, payload))
+        return enqueue_success
+
+    async def connect(*_args, **_kwargs):
+        assert old_relay.closed
+        assert not frames
+        return new_relay
+
+    bridge._worker = SimpleNamespace(send=send)
+    monkeypatch.setattr("app.usb.bridge.connect", connect)
+    payload = {"device_id": "test-device", "device_token": "dummy-test-token"}
+    if recovery_id is not None:
+        payload["recovery_id"] = recovery_id
+    try:
+        await bridge._open_relay(json.dumps(payload).encode())
+        acknowledgments = [data for kind, data in frames if kind == UsbFrameType.HOST_OPEN_ACK]
+        assert len(acknowledgments) == 1
+        assert (json.loads(acknowledgments[0]) if recovery_id else acknowledgments[0]) == (
+            {"recovery_id": recovery_id} if recovery_id else b""
+        )
+        if enqueue_success:
+            assert bridge._relay is new_relay
+        else:
+            assert bridge._relay is None
+            assert bridge._relay_reader is None
+            assert new_relay.closed
+    finally:
+        await bridge._close_relay(send_close=False)
+    assert new_relay.closed

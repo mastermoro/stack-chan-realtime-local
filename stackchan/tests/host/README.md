@@ -31,6 +31,17 @@ and outbound microphone audio while the response fence is closed. The USB tests
 exercise actual COBS/CRC framing with continuous producers, byte/time/packet
 receive budgets, partial maximum-size frames, and clock wraparound.
 
+Lost-ack tests verify that the five-second fence deadline disconnects the old
+transport instead of unmuting it, including clock rollover, repeated interrupts,
+late/stale acknowledgements, transport switching, and correlated USB recovery.
+Queued USB close/open frames cannot clear an outstanding fence. Recovery status
+discloses the reset conversation context through the new session's handshake.
+
+The runner also extracts the production Face control functions from `main.cpp`
+and compiles them with small audio/relay I/O fakes. These regressions check that
+successful top/screen interrupts immediately re-enable capture, failed sends
+remain in Error, and upstream reconnect preserves capture plus its reset notice.
+
 The budgets bound receive work between opportunities to service touch input;
 a frame handler already in progress still runs to completion. These are
 scheduling and protocol regressions, not a measurement of physical touch or

@@ -1,6 +1,7 @@
 #include "relay_client.hpp"
 
 #include <ArduinoJson.h>
+#include <algorithm>
 #include <cstdlib>
 #include <iostream>
 #include <stdexcept>
@@ -20,6 +21,7 @@ struct Harness {
   size_t emotions = 0;
   size_t notices = 0;
   size_t reconnects = 0;
+  std::string last_notice;
   bool usb = false;
 
   Harness() {
@@ -28,7 +30,7 @@ struct Harness {
     client.on_audio([&](const uint8_t*, size_t) { ++audio; });
     client.on_response_done([&]() { ++done; });
     client.on_emotion([&](const char*) { ++emotions; });
-    client.on_notice([&](const char*, const char*) { ++notices; });
+    client.on_notice([&](const char* title, const char*) { ++notices; last_notice = title; });
     client.on_session_reconnected([&]() { ++reconnects; });
   }
   void begin(bool use_usb = false) {
@@ -82,7 +84,7 @@ struct Harness {
   uint32_t interrupt(const char* type = "conversation.pause") {
     Serial.output.clear();
     WebSocketsClient::instance->sent_text.clear();
-    client.send_control(type);
+    require(client.send_control(type), "interrupt send reported failure");
     std::string sent;
     if (usb) {
       UsbTransport decoder;
@@ -106,6 +108,43 @@ struct Harness {
   void ack(uint32_t id) {
     text("{\"type\":\"conversation.paused\",\"interrupt_id\":" + std::to_string(id) + "}");
   }
+  void tick(uint32_t ms) {
+    test_clock_us += static_cast<uint64_t>(ms) * 1000;
+    if (usb) receive_usb(UsbFrameType::HostProbe);
+    client.loop();
+  }
+  void fresh_connection(uint32_t recovery_id) {
+    if (usb) {
+      receive_usb(UsbFrameType::HostOpenAck,
+                  "{\"recovery_id\":" + std::to_string(recovery_id) + "}");
+    } else {
+      WebSocketsClient::instance->emit(WStype_CONNECTED);
+    }
+    require(client.connected(), "fresh handshake did not recover the connection");
+    require(last_notice == "CONVERSATION RESET", "recovery did not disclose reset conversation context");
+    text(R"({"type":"session.ready"})");
+    text(R"({"type":"hello.ack"})");
+    require(last_notice == "CONVERSATION RESET", "handshake notices erased the conversation reset disclosure");
+    require(client.send_control("audio.start"), "fresh connection could not start listening");
+    states = audio = done = emotions = 0;
+    require_new_response();
+  }
+  std::vector<UsbFrameType> outgoing_usb_types() {
+    std::vector<UsbFrameType> types;
+    UsbTransport decoder;
+    decoder.on_frame([&](UsbFrameType type, const uint8_t* data, size_t size) {
+      types.push_back(type);
+      if (type == UsbFrameType::DeviceOpen) {
+        JsonDocument doc;
+        require(!deserializeJson(doc, data, size), "invalid recovery DeviceOpen JSON");
+        require(doc["recovery_id"].is<uint32_t>() && doc["recovery_id"].as<uint32_t>() != 0,
+                "recovery DeviceOpen omitted its correlation ID");
+      }
+    });
+    Serial.input.insert(Serial.input.end(), Serial.output.begin(), Serial.output.end());
+    while (Serial.available()) decoder.loop();
+    return types;
+  }
 };
 
 int main(int argc, char** argv) {
@@ -123,7 +162,7 @@ int main(int argc, char** argv) {
       h.stale_response();
       h.require_suppressed();
       const uint32_t id = h.interrupt();
-      test_clock_us += 60'000'000;
+      test_clock_us += 4'000'000;
       h.stale_response();
       h.require_suppressed();
       h.ack(id);
@@ -160,7 +199,7 @@ int main(int argc, char** argv) {
     } else if (name == "failed_send") {
       WebSocketsClient::instance->send_ok = false;
       Serial.fail_write = true;
-      h.client.send_control("conversation.pause");
+      require(!h.client.send_control("conversation.pause"), "failed interrupt incorrectly reported success");
       require(h.notices > 0, "failed interrupt send was silently ignored");
       Serial.fail_write = false;
       // A genuine connection error may be shown, but no response may leak.
@@ -193,8 +232,12 @@ int main(int argc, char** argv) {
       h.receive_usb(UsbFrameType::HostClose);
       require(h.state == AgentState::Disconnected, "USB fence hid a real disconnect");
       h.receive_usb(UsbFrameType::HostOpenAck);
+      require(!h.client.connected(), "queued bare USB open ack released the interruption fence");
       h.states = h.audio = h.done = h.emotions = 0;
-      h.require_new_response();
+      h.state = AgentState::Listening;
+      h.stale_response();
+      h.require_suppressed();
+      h.fresh_connection(usb_id);
       require(h.interrupt() > usb_id, "USB reconnect reused an interrupt ID");
     } else if (name == "notices") {
       h.interrupt();
@@ -219,6 +262,78 @@ int main(int argc, char** argv) {
       h.require_suppressed();
       h.ack(id);
       h.require_new_response();
+    } else if (name == "lost_ack" || name == "timeout_wrap") {
+      if (name == "timeout_wrap") test_clock_us = (UINT32_MAX - 2000ULL) * 1000;
+      const uint32_t id = h.interrupt();
+      const size_t disconnects = WebSocketsClient::instance->disconnects;
+      h.tick(4999);
+      require(h.client.connected(), "fence forced a reconnect before its deadline");
+      h.stale_response();
+      h.require_suppressed();
+      h.tick(1);
+      require(!h.client.connected(), "lost pause acknowledgement left connection fenced forever");
+      if (use_usb) {
+        const auto types = h.outgoing_usb_types();
+        require(std::find(types.begin(), types.end(), UsbFrameType::DeviceClose) != types.end(),
+                "USB timeout did not request a real connection close");
+        require(std::find(types.begin(), types.end(), UsbFrameType::DeviceOpen) != types.end(),
+                "USB timeout did not request a fresh connection open");
+        h.receive_usb(UsbFrameType::HostOpenAck);  // old queued handshake
+        h.receive_usb(UsbFrameType::HostOpenAck, "{\"recovery_id\":" + std::to_string(id + 1) + "}");
+        require(!h.client.connected(), "old USB handshake reopened a timed-out connection");
+      } else {
+        require(WebSocketsClient::instance->disconnects == disconnects + 1,
+                "WiFi timeout did not disconnect the actual WebSocket");
+      }
+      h.states = 0;
+      h.state = AgentState::Listening;
+      h.ack(id);  // a late ack cannot undo a transport reconnect in progress
+      h.stale_response();
+      h.require_suppressed();
+      h.tick(20'000);
+      h.require_suppressed();
+      if (!use_usb) require(WebSocketsClient::instance->disconnects == disconnects + 1,
+                           "pending recovery repeatedly forced WiFi disconnects");
+      h.fresh_connection(id);
+      require(h.interrupt() > id, "timeout recovery reused an interrupt ID");
+    } else if (name == "timeout_repeated") {
+      const uint32_t first = h.interrupt();
+      h.tick(4000);
+      const uint32_t latest = h.interrupt();
+      h.tick(4000);
+      h.ack(first);
+      h.ack(latest + 1);
+      h.text(R"({"type":"conversation.paused","interrupt_id":"bad"})");
+      h.tick(999);
+      require(h.client.connected(), "new user interrupt did not receive its own ack deadline");
+      h.tick(1);
+      require(!h.client.connected(), "stale/malformed ack extended the current fence deadline");
+      h.fresh_connection(latest);
+    } else if (name == "acked_deadline") {
+      const uint32_t id = h.interrupt();
+      h.tick(4999);
+      h.ack(id);
+      h.tick(20'000);
+      require(h.client.connected(), "acknowledged fence later forced a reconnect");
+      h.require_new_response();
+    } else if (name == "timeout_switch") {
+      h.interrupt();
+      h.tick(4000);
+      h.client.end();
+      h.begin(!use_usb);
+      h.tick(20'000);
+      require(h.client.connected(), "old fence deadline disconnected a newly selected transport");
+      h.require_new_response();
+    } else if (name == "context_reset") {
+      h.text(R"({"type":"session.reconnected"})");
+      require(h.reconnects == 1 && h.last_notice == "CONVERSATION RESET",
+              "upstream reconnect did not disclose conversation reset");
+      h.text(R"({"type":"session.ready"})");
+      h.text(R"({"type":"hello.ack"})");
+      require(h.last_notice == "CONVERSATION RESET", "session ready erased the context reset notice");
+      require(h.client.send_control("audio.start"), "new listening request failed");
+      h.text(R"({"type":"hello.ack"})");
+      require(h.last_notice == "DEVICE READY", "context reset disclosure did not clear for new conversation");
     } else {
       throw std::runtime_error("unknown test");
     }
